@@ -1,0 +1,18 @@
+{
+  "analysis_date": "2026-05-25",
+  "artifact_warning": null,
+  "command": "/home/barbara/tradingagents/.venv/bin/python /home/barbara/tradingagents/examples/run_fmp_mcp_stack.py SPY 2026-05-25",
+  "duration_hms": "02:36:27",
+  "exit_code": 0,
+  "finished_at": "2026-05-25T14:47:31",
+  "has_final_markdown": true,
+  "index_url": "http://10.17.17.98:8765/spy-2026-05-25-20260525-121104-ethan-pid307730/index.html",
+  "live_url": "http://10.17.17.98:8765/spy-2026-05-25-20260525-121104-ethan-pid307730/live.html",
+  "raw_url": "http://10.17.17.98:8765/spy-2026-05-25-20260525-121104-ethan-pid307730/console.txt",
+  "slug": "spy-2026-05-25-20260525-121104-ethan-pid307730",
+  "stack": "fmp",
+  "started_at": "2026-05-25T12:11:04",
+  "status": "completed",
+  "ticker": "SPY",
+  "title": "Ticker Agents Run: SPY @ 2026-05-25"
+}

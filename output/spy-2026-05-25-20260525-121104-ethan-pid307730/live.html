@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="refresh" content="15" />
+  <title>Ticker Agents Run: SPY @ 2026-05-25</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { background:#0b1020; color:#e5e7eb; font-family:Inter,system-ui,sans-serif; margin:0; }
+    header { padding:20px 24px; border-bottom:1px solid #223; position:sticky; top:0; background:#0b1020; z-index:10; }
+    h1 { margin:0 0 8px 0; font-size:20px; }
+    .meta { color:#9ca3af; font-size:14px; display:flex; gap:16px; flex-wrap:wrap; }
+    main { padding:24px; display:grid; gap:18px; max-width:1200px; margin:0 auto; }
+    a { color:#93c5fd; }
+    .pill { display:inline-block; padding:3px 8px; border-radius:999px; background:#1f2937; color:#d1d5db; font-size:12px; }
+    .grid { display:grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr); gap:18px; align-items:start; }
+    .panel { background:#111827; border:1px solid #1f2937; border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,.18); }
+    .panel h2 { margin:0; font-size:16px; padding:16px 18px; border-bottom:1px solid #1f2937; }
+    .panel-body { padding:16px 18px; }
+    .stats { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }
+    .stat { background:#0b1222; border:1px solid #243045; border-radius:12px; padding:12px; }
+    .stat-label { display:block; font-size:12px; color:#94a3b8; margin-bottom:6px; }
+    .stat-value { font-size:22px; font-weight:700; }
+    .feed { display:grid; gap:12px; }
+    .entry { border:1px solid #22304a; border-left-width:6px; border-radius:12px; background:#0d1528; overflow:hidden; }
+    .entry-header { padding:10px 14px; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:#cbd5e1; background:rgba(255,255,255,.02); border-bottom:1px solid rgba(255,255,255,.05); }
+    .entry-body { padding:14px; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; line-height:1.55; }
+    .entry-human { border-left-color:#38bdf8; background:#081824; }
+    .entry-ai { border-left-color:#818cf8; background:#0f1530; }
+    .entry-tool { border-left-color:#f59e0b; background:#201506; }
+    .entry-final { border-left-color:#22c55e; background:#071b12; }
+    .entry-final .entry-body { font-family:inherit; font-size:14px; }
+    .entry-system { border-left-color:#64748b; background:#121826; }
+    .markdown { line-height:1.65; }
+    .markdown h1, .markdown h2, .markdown h3 { line-height:1.25; }
+    .markdown code, .markdown pre { background:#0b1020; border-radius:8px; }
+    .markdown pre { padding:16px; overflow:auto; }
+    .markdown table { border-collapse:collapse; width:100%; }
+    .markdown th, .markdown td { border:1px solid #263244; padding:8px 10px; text-align:left; vertical-align:top; }
+    .markdown blockquote { border-left:4px solid #374151; margin-left:0; padding-left:16px; color:#cbd5e1; }
+    .raw-log { max-height:70vh; overflow:auto; white-space:pre-wrap; word-break:break-word; background:#0b1222; border:1px solid #243045; border-radius:12px; padding:14px; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; line-height:1.5; }
+    .muted { color:#94a3b8; }
+    @media (max-width: 980px) { .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Ticker Agents Run: SPY @ 2026-05-25</h1>
+    <div class="meta">
+      <span id="status" class="pill">Loading…</span>
+      <span id="duration">Duration: --</span>
+      <a href="console.txt">Raw text</a>
+      <a href="index.html">Run index</a>
+      <a href="final.html">Rendered final decision</a>
+    </div>
+  </header>
+  <main>
+    <div class="grid">
+      <section class="panel">
+        <h2>Live structured view</h2>
+        <div class="panel-body">
+          <div class="feed" id="feed">
+            <div class="entry entry-system"><div class="entry-header">Loading</div><div class="entry-body">Waiting for output…</div></div>
+          </div>
+        </div>
+      </section>
+      <aside class="panel">
+        <h2>Run summary</h2>
+        <div class="panel-body">
+          <div class="stats">
+            <div class="stat"><span class="stat-label">Human messages</span><span class="stat-value" id="humanCount">0</span></div>
+            <div class="stat"><span class="stat-label">Tool calls</span><span class="stat-value" id="toolCount">0</span></div>
+            <div class="stat"><span class="stat-label">AI blocks</span><span class="stat-value" id="aiCount">0</span></div>
+            <div class="stat"><span class="stat-label">Final sections</span><span class="stat-value" id="finalCount">0</span></div>
+          </div>
+          <p class="muted" style="margin-top:16px">Color coding: blue = human, amber = tool calls, indigo = AI output, green = final recommendation.</p>
+          <details style="margin-top:18px">
+            <summary>Raw log</summary>
+            <div id="log" class="raw-log">Loading output…</div>
+          </details>
+        </div>
+      </aside>
+    </div>
+  </main>
+  <script>
+    const logEl = document.getElementById('log');
+    const feedEl = document.getElementById('feed');
+    const statusEl = document.getElementById('status');
+    const durationEl = document.getElementById('duration');
+    const humanCountEl = document.getElementById('humanCount');
+    const toolCountEl = document.getElementById('toolCount');
+    const aiCountEl = document.getElementById('aiCount');
+    const finalCountEl = document.getElementById('finalCount');
+
+    function escapeHtml(value) {
+      return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    }
+
+    function renderInlineMarkdown(md) {
+      let body = escapeHtml(md.trim());
+      body = body.replace(/^###\s+(.*)$/gm, '<h3>$1</h3>');
+      body = body.replace(/^##\s+(.*)$/gm, '<h2>$1</h2>');
+      body = body.replace(/^#\s+(.*)$/gm, '<h1>$1</h1>');
+      body = body.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      body = body.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      body = body.replace(/`([^`]+)`/g, '<code>$1</code>');
+      body = body.replace(/
+
+/g, '</p><p>');
+      body = body.replace(/
+-\s+/g, '
+• ');
+      return '<div class="markdown"><p>' + body + '</p></div>';
+    }
+
+    function buildEntry(kind, label, body, isMarkdown=false) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'entry entry-' + kind;
+      const header = document.createElement('div');
+      header.className = 'entry-header';
+      header.textContent = label;
+      const content = document.createElement('div');
+      content.className = 'entry-body';
+      if (isMarkdown) {
+        content.innerHTML = renderInlineMarkdown(body);
+      } else {
+        content.textContent = body.trim() || '…';
+      }
+      wrapper.appendChild(header);
+      wrapper.appendChild(content);
+      return wrapper;
+    }
+
+    function parseStructuredEntries(logText) {
+      const entries = [];
+      const finalMatches = [...logText.matchAll(/=== FINAL_DECISION_MARKDOWN_BEGIN ===([\s\S]*?)=== FINAL_DECISION_MARKDOWN_END ===/g)];
+      const cleaned = logText.replace(/=== FINAL_DECISION_MARKDOWN_BEGIN ===[\s\S]*?=== FINAL_DECISION_MARKDOWN_END ===/g, '').trim();
+      const humanHeader = '================================ Human Message =================================';
+      const aiHeader = '================================== Ai Message ==================================';
+      const lines = cleaned.split('
+');
+      let current = [];
+      let currentKind = 'system';
+      let currentLabel = 'System / setup';
+
+      function flushCurrent() {
+        const body = current.join('
+').trim();
+        if (body) entries.push({ kind: currentKind, label: currentLabel, body });
+        current = [];
+      }
+
+      for (const line of lines) {
+        if (line === humanHeader) {
+          flushCurrent();
+          currentKind = 'human';
+          currentLabel = 'Human message';
+          continue;
+        }
+        if (line === aiHeader) {
+          flushCurrent();
+          currentKind = 'ai';
+          currentLabel = 'AI output';
+          continue;
+        }
+        current.push(line);
+      }
+      flushCurrent();
+
+      const expanded = [];
+      for (const entry of entries) {
+        if (entry.kind !== 'ai') {
+          expanded.push(entry);
+          continue;
+        }
+        const toolRegex = /<tool_call>[\s\S]*?<\/tool_call>/g;
+        const toolMatches = [...entry.body.matchAll(toolRegex)];
+        const plain = entry.body.replace(toolRegex, '').trim();
+        if (plain) expanded.push({ kind:'ai', label:'AI output', body: plain });
+        for (const match of toolMatches) {
+          expanded.push({ kind:'tool', label:'Tool call', body: match[0] });
+        }
+      }
+
+      for (const match of finalMatches) {
+        expanded.push({ kind:'final', label:'Final recommendation', body: match[1].trim(), markdown: true });
+      }
+      return expanded;
+    }
+
+    function renderEntries(logText) {
+      const entries = parseStructuredEntries(logText);
+      feedEl.replaceChildren();
+      if (!entries.length) {
+        feedEl.appendChild(buildEntry('system', 'No output yet', 'Waiting for output…'));
+      }
+      let human = 0, tool = 0, ai = 0, final = 0;
+      for (const entry of entries) {
+        if (entry.kind === 'human') human += 1;
+        if (entry.kind === 'tool') tool += 1;
+        if (entry.kind === 'ai') ai += 1;
+        if (entry.kind === 'final') final += 1;
+        feedEl.appendChild(buildEntry(entry.kind, entry.label, entry.body, Boolean(entry.markdown)));
+      }
+      humanCountEl.textContent = String(human);
+      toolCountEl.textContent = String(tool);
+      aiCountEl.textContent = String(ai);
+      finalCountEl.textContent = String(final);
+    }
+
+    async function refresh() {
+      try {
+        const [logResp, metaResp] = await Promise.all([
+          fetch('console.txt?ts=' + Date.now()),
+          fetch('metadata.json?ts=' + Date.now()),
+        ]);
+        const logText = await logResp.text();
+        logEl.textContent = logText;
+        renderEntries(logText);
+        const meta = await metaResp.json();
+        statusEl.textContent = meta.status || 'unknown';
+        durationEl.textContent = 'Duration: ' + (meta.duration_hms || '--');
+        window.scrollTo(0, document.body.scrollHeight);
+      } catch (err) {
+        statusEl.textContent = 'refresh failed';
+      }
+    }
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>

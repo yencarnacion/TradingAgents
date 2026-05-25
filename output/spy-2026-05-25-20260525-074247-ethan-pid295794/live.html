@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="refresh" content="15" />
+  <title>Ticker Agents Run: SPY @ 2026-05-25</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { background:#0b1020; color:#e5e7eb; font-family:Inter,system-ui,sans-serif; margin:0; }
+    header { padding:20px 24px; border-bottom:1px solid #223; position:sticky; top:0; background:#0b1020; }
+    h1 { margin:0 0 8px 0; font-size:20px; }
+    .meta { color:#9ca3af; font-size:14px; display:flex; gap:16px; flex-wrap:wrap; }
+    main { padding:24px; }
+    pre { white-space:pre-wrap; word-break:break-word; background:#111827; border:1px solid #1f2937; border-radius:12px; padding:16px; overflow:auto; min-height:60vh; }
+    a { color:#93c5fd; }
+    .pill { display:inline-block; padding:3px 8px; border-radius:999px; background:#1f2937; color:#d1d5db; font-size:12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Ticker Agents Run: SPY @ 2026-05-25</h1>
+    <div class="meta">
+      <span id="status" class="pill">Loading…</span>
+      <span id="duration">Duration: --</span>
+      <a href="console.txt">Raw text</a>
+      <a href="index.html">Run index</a>
+      <a href="final.html">Rendered final decision</a>
+    </div>
+  </header>
+  <main>
+    <pre id="log">Loading output…</pre>
+  </main>
+  <script>
+    const logEl = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+    const durationEl = document.getElementById('duration');
+    async function refresh() {
+      try {
+        const [logResp, metaResp] = await Promise.all([
+          fetch('console.txt?ts=' + Date.now()),
+          fetch('metadata.json?ts=' + Date.now()),
+        ]);
+        logEl.textContent = await logResp.text();
+        const meta = await metaResp.json();
+        statusEl.textContent = meta.status || 'unknown';
+        durationEl.textContent = 'Duration: ' + (meta.duration_hms || '--');
+        window.scrollTo(0, document.body.scrollHeight);
+      } catch (err) {
+        statusEl.textContent = 'refresh failed';
+      }
+    }
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>

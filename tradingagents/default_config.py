@@ -12,11 +12,16 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_DEEP_THINK_LLM":       "deep_think_llm",
     "TRADINGAGENTS_QUICK_THINK_LLM":      "quick_think_llm",
     "TRADINGAGENTS_LLM_BACKEND_URL":      "backend_url",
+    "TRADINGAGENTS_MARKET_DATA_MCP_URL":  "market_data_mcp_url",
+    "TRADINGAGENTS_NEWS_MCP_URL":         "news_mcp_url",
+    "TRADINGAGENTS_FMP_MCP_URL":          "fmp_mcp_url",
+    "TRADINGAGENTS_MCP_VERIFY_TLS":       "mcp_verify_tls",
     "TRADINGAGENTS_OUTPUT_LANGUAGE":      "output_language",
     "TRADINGAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
+    "TRADINGAGENTS_SENTIMENT_X_SOURCE":   "sentiment_x_source",
 }
 
 
@@ -60,6 +65,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # provider-specific URL here would leak (e.g. OpenAI's /v1 was previously
     # being forwarded to Gemini, producing malformed request URLs).
     "backend_url": None,
+    # Optional remote MCP endpoints used as authenticated data/research gateways.
+    # These let TradingAgents reuse preconfigured servers instead of storing
+    # provider API keys locally in this process.
+    "market_data_mcp_url": None,
+    "news_mcp_url": None,
+    "fmp_mcp_url": None,
+    "mcp_verify_tls": True,
     # Provider-specific thinking configuration
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"
@@ -93,15 +105,18 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {
-        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
-        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
-        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
-        "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance, massive, fmp
+        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance, fmp
+        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance, massive, fmp
+        "news_data": "yfinance",             # Options: alpha_vantage, yfinance, massive, perplexity, grok, fmp
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
+    # Optional X/Twitter sentiment enrichment for the sentiment analyst.
+    # Set to "grok" to prefetch an X-search-backed sentiment block via xAI.
+    "sentiment_x_source": "disabled",
     # Benchmark for alpha calculation in the reflection layer.
     # ``benchmark_ticker`` (when set) overrides the suffix map for all
     # tickers; leave it None to use ``benchmark_map`` for auto-detection
