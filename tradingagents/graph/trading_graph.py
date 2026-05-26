@@ -48,6 +48,7 @@ from tradingagents.agents.utils.agent_utils import (
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
+from .debug_stream import split_new_messages
 from .setup import GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
@@ -363,12 +364,14 @@ class TradingAgentsGraph:
 
         if self.debug:
             trace = []
+            seen_message_signatures = []
             for chunk in self.graph.stream(init_agent_state, **args):
-                if len(chunk["messages"]) == 0:
-                    pass
-                else:
-                    chunk["messages"][-1].pretty_print()
-                    trace.append(chunk)
+                trace.append(chunk)
+                new_messages, seen_message_signatures = split_new_messages(
+                    chunk.get("messages", []), seen_message_signatures
+                )
+                for message in new_messages:
+                    message.pretty_print()
             # Streamed chunks are per-node deltas. Merge them so the returned
             # state matches what graph.invoke() yields in the non-debug path.
             final_state = {}
