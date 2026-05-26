@@ -83,6 +83,13 @@ _MINIMAX_THINKING = ModelCapabilities(
     requires_reasoning_split=True,
 )
 
+_QWEN_COMPAT_LOCAL = ModelCapabilities(
+    supports_tool_choice=False,
+    supports_json_mode=True,
+    supports_json_schema=True,
+    preferred_structured_method="function_calling",
+)
+
 _DEFAULT = ModelCapabilities(
     supports_tool_choice=True,
     supports_json_mode=True,
@@ -106,6 +113,9 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "MiniMax-M2.1": _MINIMAX_THINKING,
     "MiniMax-M2.1-highspeed": _MINIMAX_THINKING,
     "MiniMax-M2": _MINIMAX_THINKING,
+    # Local OpenAI-compatible Qwen endpoint on this workspace rejects
+    # LangChain's tool_choice="auto" unless server flags are enabled.
+    "Qwen/Qwen3.6-27B-FP8": _QWEN_COMPAT_LOCAL,
 }
 
 # Forward-compat patterns. New ``deepseek-v5-*`` / ``deepseek-reasoner-*``
