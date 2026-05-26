@@ -13,6 +13,7 @@ from .y_finance import (
 from .yfinance_news import get_news_yfinance, get_global_news_yfinance
 from .massive import (
     get_stock_data as get_massive_stock,
+    get_indicators as get_massive_indicators,
     get_fundamentals as get_massive_fundamentals,
     get_balance_sheet as get_massive_balance_sheet,
     get_cashflow as get_massive_cashflow,
@@ -109,6 +110,7 @@ VENDOR_METHODS = {
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
+        "massive": get_massive_indicators,
         "fmp": get_fmp_indicators,
     },
     # fundamental_data
@@ -181,6 +183,22 @@ def get_vendor(category: str, method: str = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
+def _should_try_fallback(result) -> bool:
+    """Return True when a vendor result looks like a fetch failure or empty payload."""
+    if result is None:
+        return True
+    if not isinstance(result, str):
+        return False
+
+    text = result.strip().lower()
+    if not text:
+        return True
+    return (
+        text.startswith("error retrieving")
+        or text.startswith("failed to")
+        or (text.startswith("no ") and (" found" in text or " available" in text))
+    )
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
@@ -197,16 +215,31 @@ def route_to_vendor(method: str, *args, **kwargs):
         if vendor not in fallback_vendors:
             fallback_vendors.append(vendor)
 
-    for vendor in fallback_vendors:
+    last_error = None
+    for index, vendor in enumerate(fallback_vendors):
         if vendor not in VENDOR_METHODS[method]:
             continue
 
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
+        has_more_vendors = index < len(fallback_vendors) - 1
 
         try:
-            return impl_func(*args, **kwargs)
+            result = impl_func(*args, **kwargs)
         except AlphaVantageRateLimitError:
             continue  # Only rate limits trigger fallback
+        except Exception as exc:
+            last_error = exc
+            if has_more_vendors:
+                continue
+            raise
 
+        if has_more_vendors and _should_try_fallback(result):
+            last_error = result
+            continue
+
+        return result
+
+    if last_error:
+        raise RuntimeError(f"No available vendor for '{method}'; last failure: {last_error}")
     raise RuntimeError(f"No available vendor for '{method}'")

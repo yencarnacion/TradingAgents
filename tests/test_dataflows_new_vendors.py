@@ -28,6 +28,17 @@ class InterfaceVendorRoutingTests(unittest.TestCase):
         self.assertIn("grok", interface.VENDOR_LIST)
         self.assertIn("fmp", interface.VENDOR_LIST)
 
+    def test_default_config_prefers_massive_when_supported(self):
+        cfg = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+        self.assertEqual(cfg["data_vendors"]["core_stock_apis"], "massive")
+        self.assertEqual(cfg["data_vendors"]["fundamental_data"], "massive")
+        self.assertEqual(cfg["data_vendors"]["news_data"], "massive")
+        self.assertEqual(cfg["data_vendors"]["technical_indicators"], "massive")
+        self.assertEqual(cfg["tool_vendors"]["get_news"], "massive,fmp,grok")
+        self.assertEqual(cfg["tool_vendors"]["get_global_news"], "grok,fmp")
+        self.assertEqual(cfg["tool_vendors"]["get_insider_transactions"], "fmp")
+
     def test_routes_stock_data_to_massive_when_configured(self):
         set_config({"tool_vendors": {"get_stock_data": "massive"}})
         interface.VENDOR_METHODS["get_stock_data"]["massive"] = lambda *args, **kwargs: "massive-stock"
@@ -52,6 +63,15 @@ class InterfaceVendorRoutingTests(unittest.TestCase):
 
         self.assertEqual(result, "fmp-fundamentals")
 
+    def test_default_news_prefers_massive_over_yfinance(self):
+        set_config({"tool_vendors": {"get_news": "massive"}})
+        interface.VENDOR_METHODS["get_news"]["massive"] = lambda *args, **kwargs: "massive-news"
+        interface.VENDOR_METHODS["get_news"]["yfinance"] = lambda *args, **kwargs: "yfinance-news"
+
+        result = interface.route_to_vendor("get_news", "AAPL", "2026-01-01", "2026-01-10")
+
+        self.assertEqual(result, "massive-news")
+
     def test_missing_primary_vendor_falls_back_to_available_provider(self):
         set_config({"tool_vendors": {"get_global_news": "massive"}})
         interface.VENDOR_METHODS["get_global_news"]["yfinance"] = lambda *args, **kwargs: "fallback-news"
@@ -59,6 +79,25 @@ class InterfaceVendorRoutingTests(unittest.TestCase):
         result = interface.route_to_vendor("get_global_news", "2026-01-10")
 
         self.assertEqual(result, "fallback-news")
+
+    def test_news_chain_falls_back_from_massive_to_fmp_then_grok(self):
+        set_config({"tool_vendors": {"get_news": "massive,fmp,grok"}})
+        interface.VENDOR_METHODS["get_news"]["massive"] = lambda *args, **kwargs: "No news found for AAPL between 2026-01-01 and 2026-01-10"
+        interface.VENDOR_METHODS["get_news"]["fmp"] = lambda *args, **kwargs: "fmp-news"
+        interface.VENDOR_METHODS["get_news"]["grok"] = lambda *args, **kwargs: "grok-news"
+
+        result = interface.route_to_vendor("get_news", "AAPL", "2026-01-01", "2026-01-10")
+
+        self.assertEqual(result, "fmp-news")
+
+    def test_global_news_chain_falls_back_from_grok_error_to_fmp(self):
+        set_config({"tool_vendors": {"get_global_news": "grok,fmp"}})
+        interface.VENDOR_METHODS["get_global_news"]["grok"] = lambda *args, **kwargs: "Error retrieving Grok global news: timeout"
+        interface.VENDOR_METHODS["get_global_news"]["fmp"] = lambda *args, **kwargs: "fmp-global-news"
+
+        result = interface.route_to_vendor("get_global_news", "2026-01-10")
+
+        self.assertEqual(result, "fmp-global-news")
 
 
 @pytest.mark.unit

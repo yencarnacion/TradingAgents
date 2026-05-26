@@ -1,4 +1,9 @@
-from langchain_core.messages import HumanMessage, RemoveMessage
+from __future__ import annotations
+
+import re
+from typing import Any, cast
+
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 
 # Import tools from separate utility files
 from tradingagents.agents.utils.core_stock_tools import (
@@ -59,6 +64,118 @@ def build_instrument_context(ticker: str, asset_type: str = "stock") -> str:
         "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`, `-USD`)."
         + extra_hint
     )
+
+
+_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+_FUNCTION_RE = re.compile(r"<function=([^>]+)>\s*(.*?)\s*</function>", re.DOTALL)
+_PARAMETER_RE = re.compile(r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
+
+
+def _coerce_tool_parameter(value: str):
+    text = value.strip()
+    lowered = text.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if re.fullmatch(r"[-+]?\d+", text):
+        try:
+            return int(text)
+        except ValueError:
+            return text
+    if re.fullmatch(r"[-+]?\d*\.\d+", text):
+        try:
+            return float(text)
+        except ValueError:
+            return text
+    return text
+
+
+def extract_tool_calls_from_markup(content: str) -> list[dict]:
+    """Parse DeepSeek/Qwen-style XML-ish tool-call markup into LangChain tool_calls."""
+    if not isinstance(content, str) or "<tool_call>" not in content:
+        return []
+
+    tool_calls: list[dict] = []
+    for idx, block_match in enumerate(_TOOL_CALL_BLOCK_RE.finditer(content), start=1):
+        block = block_match.group(1)
+        function_match = _FUNCTION_RE.search(block)
+        if not function_match:
+            continue
+        function_name = function_match.group(1).strip()
+        body = function_match.group(2)
+        args = {
+            name.strip(): _coerce_tool_parameter(value)
+            for name, value in _PARAMETER_RE.findall(body)
+        }
+        tool_calls.append(
+            {
+                "name": function_name,
+                "args": args,
+                "id": f"call_{idx}",
+                "type": "tool_call",
+            }
+        )
+    return tool_calls
+
+
+def coerce_ai_message_tool_markup(message: AIMessage) -> AIMessage:
+    """Populate ``message.tool_calls`` from XML-ish markup when providers omit structured calls."""
+    if not isinstance(message, AIMessage) or getattr(message, "tool_calls", None):
+        return message
+
+    content = message.content
+    if not isinstance(content, str):
+        return message
+
+    parsed = extract_tool_calls_from_markup(content)
+    if parsed:
+        message.tool_calls = cast(Any, parsed)
+    return message
+
+
+def invoke_bound_tools_until_completion(
+    chain,
+    initial_messages,
+    *,
+    tools,
+    max_rounds: int = 6,
+):
+    """Run a tool-bound analyst chain until it returns a final prose answer."""
+    tool_map = {tool.name: tool for tool in tools}
+    messages = list(initial_messages)
+    latest: AIMessage | None = None
+
+    for _ in range(max_rounds):
+        latest = coerce_ai_message_tool_markup(chain.invoke(messages))
+        messages.append(latest)
+        tool_calls = getattr(latest, "tool_calls", None) or []
+        if not tool_calls:
+            return latest
+
+        for idx, tool_call in enumerate(tool_calls, start=1):
+            name = tool_call.get("name")
+            args = tool_call.get("args", {})
+            tool = tool_map.get(name)
+            if tool is None:
+                result = f"Tool not found: {name}"
+            else:
+                try:
+                    result = tool.invoke(args)
+                except Exception as exc:  # pragma: no cover
+                    result = f"Tool {name} failed: {exc}"
+            messages.append(
+                ToolMessage(
+                    content=result if isinstance(result, str) else str(result),
+                    tool_call_id=tool_call.get("id", f"call_{idx}"),
+                    name=name or f"tool_{idx}",
+                )
+            )
+
+    if latest is None:  # pragma: no cover
+        raise RuntimeError("tool-bound chain produced no AI message")
+    return latest
+
 
 def create_msg_delete():
     def delete_messages(state):

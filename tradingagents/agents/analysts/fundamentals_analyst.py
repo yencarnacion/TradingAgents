@@ -7,6 +7,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_income_statement,
     get_insider_transactions,
     get_language_instruction,
+    invoke_bound_tools_until_completion,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -54,11 +55,15 @@ def create_fundamentals_analyst(llm):
 
         chain = prompt | llm.bind_tools(tools)
 
-        result = chain.invoke(state["messages"])
+        result = invoke_bound_tools_until_completion(
+            chain,
+            state["messages"],
+            tools=tools,
+        )
 
         report = ""
 
-        if len(result.tool_calls) == 0:
+        if isinstance(result.content, str) and len(getattr(result, "tool_calls", []) or []) == 0:
             report = result.content
 
         return {

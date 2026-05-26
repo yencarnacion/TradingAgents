@@ -46,11 +46,11 @@ def build_config():
     config["tool_vendors"]["get_balance_sheet"] = "fmp"
     config["tool_vendors"]["get_cashflow"] = "fmp"
     config["tool_vendors"]["get_income_statement"] = "fmp"
-    config["tool_vendors"]["get_news"] = "fmp"
-    config["tool_vendors"]["get_global_news"] = "fmp"
+    config["tool_vendors"]["get_news"] = "fmp,grok"
+    config["tool_vendors"]["get_global_news"] = "grok,fmp"
     config["tool_vendors"]["get_insider_transactions"] = "fmp"
-    # FMP MCP supports a smaller indicator set than yfinance stockstats,
-    # so leave technical indicators on yfinance by default.
+    # Technical indicators can be calculated locally from Massive daily OHLCV,
+    # so they no longer need the yfinance stockstats fallback.
 
     return config
 

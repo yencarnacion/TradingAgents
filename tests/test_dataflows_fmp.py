@@ -94,6 +94,18 @@ class TestFmpMcpDataflows:
         assert "Piotroski Score: 9" in result
         assert "Requested as-of date: 2026-01-10" in result
 
+    def test_get_recent_earnings_anchor_skips_etfs(self):
+        def fake_call(url, tool_name, arguments, verify=None):
+            if tool_name == "company":
+                return {"result": json.dumps([{"symbol": "QQQ", "isEtf": True}])}
+            raise AssertionError(f"unexpected call: {tool_name} {arguments}")
+
+        with patch.object(fmp, "call_tool", side_effect=fake_call):
+            result = fmp.get_recent_earnings_anchor("QQQ", "2026-05-26")
+
+        assert "not applicable" in result.lower()
+        assert "QQQ" in result
+
     def test_get_indicators_formats_rsi_history(self):
         payload_rows = [
             {"date": "2026-01-09 00:00:00", "rsi": 27.23},

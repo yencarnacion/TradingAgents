@@ -105,13 +105,21 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {
-        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance, massive, fmp
-        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance, fmp
-        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance, massive, fmp
-        "news_data": "yfinance",             # Options: alpha_vantage, yfinance, massive, perplexity, grok, fmp
+        "core_stock_apis": "massive",       # Options: alpha_vantage, yfinance, massive, fmp
+        "technical_indicators": "massive",  # Options: alpha_vantage, yfinance, massive, fmp
+        "fundamental_data": "massive",      # Options: alpha_vantage, yfinance, massive, fmp
+        "news_data": "massive",             # Options: alpha_vantage, yfinance, massive, perplexity, grok, fmp
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
+        # Prefer structured feeds from Massive/FMP for company-specific news.
+        # Let Grok act as a later fallback for synthesized web-search coverage
+        # instead of defaulting to yfinance when the structured feeds are weak.
+        "get_news": "massive,fmp,grok",
+        # Broad macro/news synthesis is a stronger Grok use case, with FMP as
+        # the structured fallback when Grok is unavailable or thin.
+        "get_global_news": "grok,fmp",
+        "get_insider_transactions": "fmp",
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
     # X/Twitter sentiment source for the sentiment analyst.

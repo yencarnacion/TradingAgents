@@ -20,10 +20,19 @@ def set_config(config: Dict):
     Dict-valued keys (e.g. ``data_vendors``) are merged one level deep so a
     partial update like ``{"data_vendors": {"core_stock_apis": "alpha_vantage"}}``
     keeps the other nested keys from the default; scalar keys are replaced.
+
+    Passing a full config object (for example ``DEFAULT_CONFIG`` copied in tests
+    or stack builders) resets the active config instead of merging stale keys
+    forward from previous runs.
     """
     global _config
     initialize_config()
     incoming = deepcopy(config)
+    default_keys = set(default_config.DEFAULT_CONFIG.keys())
+    if set(incoming.keys()) >= default_keys:
+        _config = incoming
+        return
+
     for key, value in incoming.items():
         if isinstance(value, dict) and isinstance(_config.get(key), dict):
             _config[key].update(value)

@@ -1,4 +1,5 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from tradingagents.agents.utils.market_context_tools import get_recent_earnings_anchor
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_indicators,
@@ -11,6 +12,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_session_bars,
     get_stock_data,
     get_ticker_snapshot,
+    invoke_bound_tools_until_completion,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -33,6 +35,7 @@ def create_market_analyst(llm):
             get_last_trade,
             get_nbbo_quotes,
             get_options_chain,
+            get_recent_earnings_anchor,
             get_indicators,
         ]
 
@@ -61,7 +64,7 @@ Volatility Indicators:
 Volume-Based Indicators:
 - vwma: VWMA: A moving average weighted by volume. Usage: Confirm trends by integrating price action with volume data. Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses.
 
-- Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail. Always ground the report in market structure first: call get_market_regime for tape context, get_ticker_snapshot for the instrument snapshot, get_intraday_bars and get_session_bars for premarket/regular/postmarket structure, and get_options_chain for near-spot options positioning when useful. Use get_last_trade and get_nbbo_quotes only for short-horizon execution/timing context, not as a replacement for broader structure. Call get_stock_data before get_indicators whenever you need indicator analysis. Write a very detailed and nuanced report of the trends you observe. The report must explicitly cover market regime, intraday structure, session behavior, options context (without inventing greeks/open interest if they are not present), and execution/tape context when the data supports it. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
+- Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail. Always ground the report in market structure first: call get_market_regime for tape context, get_ticker_snapshot for the instrument snapshot, get_intraday_bars and get_session_bars for premarket/regular/postmarket structure, and get_options_chain for near-spot options positioning when useful. Use get_recent_earnings_anchor whenever you need a post-earnings anchor for AVWAP or to judge whether price is accepting above/below the latest earnings reaction. Use get_last_trade and get_nbbo_quotes only for short-horizon execution/timing context, not as a replacement for broader structure. Call get_stock_data before get_indicators whenever you need indicator analysis. Write a very detailed and nuanced report of the trends you observe. The report must explicitly cover market regime, intraday structure, session behavior, options context (without inventing greeks/open interest if they are not present), and execution/tape context when the data supports it. If a recent earnings anchor is available, explicitly discuss the post-earnings AVWAP regime and whether price is above, below, or repeatedly interacting with that level. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )
@@ -90,11 +93,15 @@ Volume-Based Indicators:
 
         chain = prompt | llm.bind_tools(tools)
 
-        result = chain.invoke(state["messages"])
+        result = invoke_bound_tools_until_completion(
+            chain,
+            state["messages"],
+            tools=tools,
+        )
 
         report = ""
 
-        if len(result.tool_calls) == 0:
+        if isinstance(result.content, str) and len(getattr(result, "tool_calls", []) or []) == 0:
             report = result.content
 
         return {

@@ -122,6 +122,30 @@ def _statement_period(freq: str) -> str:
     return normalized
 
 
+def _parse_iso_date(value: Any) -> Optional[datetime.date]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for candidate in (text[:10], text):
+        try:
+            return datetime.strptime(candidate, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+    return None
+
+
+def _earnings_anchor_applicable(profile: Dict[str, Any]) -> bool:
+    if not profile:
+        return True
+    for key in ("isEtf", "isFund", "fund", "etf"):
+        value = profile.get(key)
+        if isinstance(value, bool) and value:
+            return False
+        if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "y"}:
+            return False
+    return True
+
+
 def get_stock_data(symbol: str, start_date: str, end_date: str):
     try:
         rows = _rows(
@@ -240,6 +264,76 @@ def get_income_statement(ticker: str, freq: str = "quarterly", curr_date: Option
         return _financial_statement("income-statement", "Income Statement", ticker, freq, curr_date)
     except Exception as e:
         return f"Error retrieving FMP income statement for {ticker}: {e}"
+
+
+def get_recent_earnings_anchor_data(ticker: str, curr_date: str) -> Dict[str, Any]:
+    profile = _first_row("company", {"endpoint": "profile-symbol", "symbol": ticker.upper()})
+    if not _earnings_anchor_applicable(profile):
+        return {}
+
+    target_date = datetime.strptime(curr_date, "%Y-%m-%d").date()
+    rows = _rows(
+        _call(
+            "calendar",
+            {
+                "endpoint": "earnings-company",
+                "symbol": ticker.upper(),
+            },
+        )
+    )
+    eligible: List[tuple[datetime.date, Dict[str, Any]]] = []
+    for row in rows:
+        report_date = _parse_iso_date(row.get("date") or row.get("reportedDate") or row.get("fiscalDateEnding"))
+        if report_date and report_date <= target_date:
+            eligible.append((report_date, row))
+
+    if not eligible:
+        return {}
+
+    report_date, row = max(eligible, key=lambda item: item[0])
+    time_label = str(row.get("time") or "").strip().upper()
+    timing = time_label if time_label in {"BMO", "AMC", "DMT"} else ""
+    anchor_label = f"Most recent earnings ({timing + ' ' if timing else ''}{report_date.isoformat()})"
+    return {
+        "ticker": ticker.upper(),
+        "anchor_date": report_date.isoformat(),
+        "anchor_label": anchor_label,
+        "time": time_label or None,
+        "eps": _clean_value(row.get("eps") or row.get("epsActual") or row.get("epsReported")),
+        "epsEstimated": _clean_value(row.get("epsEstimated") or row.get("estimatedEps")),
+        "revenue": _clean_value(row.get("revenue") or row.get("revenueActual")),
+        "revenueEstimated": _clean_value(row.get("revenueEstimated") or row.get("estimatedRevenue")),
+        "source_vendor": "fmp",
+    }
+
+
+def get_recent_earnings_anchor(ticker: str, curr_date: str):
+    try:
+        profile = _first_row("company", {"endpoint": "profile-symbol", "symbol": ticker.upper()})
+        if not _earnings_anchor_applicable(profile):
+            return (
+                f"Earnings anchor not applicable for {ticker.upper()}: "
+                "instrument appears to be an ETF or fund rather than an operating company."
+            )
+        anchor = get_recent_earnings_anchor_data(ticker, curr_date)
+        if not anchor:
+            return f"No earnings anchor found for symbol '{ticker}' on or before {curr_date}"
+        rows = [
+            {
+                "ticker": anchor.get("ticker"),
+                "anchor_date": anchor.get("anchor_date"),
+                "time": anchor.get("time"),
+                "anchor_label": anchor.get("anchor_label"),
+                "eps": anchor.get("eps"),
+                "epsEstimated": anchor.get("epsEstimated"),
+                "revenue": anchor.get("revenue"),
+                "revenueEstimated": anchor.get("revenueEstimated"),
+                "note": "Use this earnings date as the anchored VWAP (AVWAP) start point.",
+            }
+        ]
+        return _header(f"Recent Earnings Anchor for {ticker.upper()}") + _to_csv_block(rows)
+    except Exception as e:
+        return f"Error retrieving FMP earnings anchor for {ticker}: {e}"
 
 
 def get_news(ticker: str, start_date: str, end_date: str):

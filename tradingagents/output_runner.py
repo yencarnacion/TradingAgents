@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import html
+import io
 import json
 import os
 import re
@@ -11,9 +13,15 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+import pandas as pd
+
+from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.fmp import get_recent_earnings_anchor_data
+from tradingagents.dataflows.interface import get_vendor, route_to_vendor
 from zoneinfo import ZoneInfo
 
 
@@ -27,6 +35,21 @@ STACK_EXAMPLES = {
     "grounded": "run_grounded_stack.py",
     "fmp": "run_fmp_mcp_stack.py",
 }
+TECHNICAL_INDICATORS: tuple[tuple[str, str], ...] = (
+    ("close_10_ema", "10 EMA"),
+    ("close_50_sma", "50 SMA"),
+    ("close_200_sma", "200 SMA"),
+    ("macd", "MACD"),
+    ("macds", "MACD Signal"),
+    ("macdh", "MACD Histogram"),
+    ("rsi", "RSI"),
+    ("boll", "Bollinger Middle"),
+    ("boll_ub", "Bollinger Upper Band"),
+    ("boll_lb", "Bollinger Lower Band"),
+    ("atr", "ATR"),
+    ("vwma", "VWMA"),
+)
+TECHNICAL_CHART_LOOKBACK_DAYS = 420
 
 
 @dataclass
@@ -44,6 +67,7 @@ class RunPaths:
 class ReportArtifactSpec:
     slug: str
     title: str
+    category: str
     extractor: Callable[[dict[str, Any]], Optional[str]]
 
 
@@ -119,20 +143,30 @@ def _extract_nested_text(state: dict[str, Any], *keys: str) -> Optional[str]:
 
 
 REPORT_ARTIFACT_SPECS: tuple[ReportArtifactSpec, ...] = (
-    ReportArtifactSpec("market-report", "Market Report", lambda state: _extract_nested_text(state, "market_report")),
-    ReportArtifactSpec("sentiment-report", "Sentiment Report", lambda state: _extract_nested_text(state, "sentiment_report")),
-    ReportArtifactSpec("news-report", "News Report", lambda state: _extract_nested_text(state, "news_report")),
-    ReportArtifactSpec("fundamentals-report", "Fundamentals Report", lambda state: _extract_nested_text(state, "fundamentals_report")),
-    ReportArtifactSpec("bullish-report", "Bullish Report", lambda state: _extract_nested_text(state, "investment_debate_state", "bull_history")),
-    ReportArtifactSpec("bearish-report", "Bearish Report", lambda state: _extract_nested_text(state, "investment_debate_state", "bear_history")),
-    ReportArtifactSpec("research-manager-report", "Research Manager Report", lambda state: _extract_nested_text(state, "investment_debate_state", "judge_decision")),
-    ReportArtifactSpec("investment-plan", "Investment Plan", lambda state: _extract_nested_text(state, "investment_plan")),
-    ReportArtifactSpec("trader-report", "Trader Report", lambda state: _extract_nested_text(state, "trader_investment_decision")),
-    ReportArtifactSpec("aggressive-risk-report", "Aggressive Risk Report", lambda state: _extract_nested_text(state, "risk_debate_state", "aggressive_history")),
-    ReportArtifactSpec("conservative-risk-report", "Conservative Risk Report", lambda state: _extract_nested_text(state, "risk_debate_state", "conservative_history")),
-    ReportArtifactSpec("neutral-risk-report", "Neutral Risk Report", lambda state: _extract_nested_text(state, "risk_debate_state", "neutral_history")),
-    ReportArtifactSpec("portfolio-manager-report", "Portfolio Manager Report", lambda state: _extract_nested_text(state, "risk_debate_state", "judge_decision")),
+    ReportArtifactSpec("market-report", "Market Report", "analyst", lambda state: _extract_nested_text(state, "market_report")),
+    ReportArtifactSpec("sentiment-report", "Sentiment Report", "analyst", lambda state: _extract_nested_text(state, "sentiment_report")),
+    ReportArtifactSpec("news-report", "News Report", "analyst", lambda state: _extract_nested_text(state, "news_report")),
+    ReportArtifactSpec("fundamentals-report", "Fundamentals Report", "analyst", lambda state: _extract_nested_text(state, "fundamentals_report")),
+    ReportArtifactSpec("bullish-report", "Bullish Report", "debate", lambda state: _extract_nested_text(state, "investment_debate_state", "bull_history")),
+    ReportArtifactSpec("bearish-report", "Bearish Report", "debate", lambda state: _extract_nested_text(state, "investment_debate_state", "bear_history")),
+    ReportArtifactSpec("research-manager-report", "Research Manager Report", "debate", lambda state: _extract_nested_text(state, "investment_debate_state", "judge_decision")),
+    ReportArtifactSpec("investment-plan", "Investment Plan", "decision", lambda state: _extract_nested_text(state, "investment_plan")),
+    ReportArtifactSpec("trader-report", "Trader Report", "decision", lambda state: _extract_nested_text(state, "trader_investment_decision")),
+    ReportArtifactSpec("aggressive-risk-report", "Aggressive Risk Report", "risk", lambda state: _extract_nested_text(state, "risk_debate_state", "aggressive_history")),
+    ReportArtifactSpec("conservative-risk-report", "Conservative Risk Report", "risk", lambda state: _extract_nested_text(state, "risk_debate_state", "conservative_history")),
+    ReportArtifactSpec("neutral-risk-report", "Neutral Risk Report", "risk", lambda state: _extract_nested_text(state, "risk_debate_state", "neutral_history")),
+    ReportArtifactSpec("portfolio-manager-report", "Portfolio Manager Report", "risk", lambda state: _extract_nested_text(state, "risk_debate_state", "judge_decision")),
 )
+
+REPORT_CATEGORY_TITLES: dict[str, str] = {
+    "technical": "Technical reports",
+    "analyst": "Analyst reports",
+    "debate": "Debate reports",
+    "decision": "Decision reports",
+    "risk": "Risk reports",
+}
+
+REPORT_CATEGORY_ORDER: tuple[str, ...] = tuple(REPORT_CATEGORY_TITLES)
 
 
 def state_log_path(ticker: str, analysis_date: str) -> Path:
@@ -172,7 +206,601 @@ def format_timestamp_for_display(raw: Optional[str]) -> str:
     return parsed.astimezone(NEW_YORK_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def write_report_artifacts(run_dir: Path, ticker: str, analysis_date: str, state: dict[str, Any]) -> list[dict[str, str]]:
+def _join_public_url(base_url: Optional[str], filename: str) -> Optional[str]:
+    if not base_url:
+        return None
+    return f"{base_url.rstrip('/')}/{filename}"
+
+
+def summarize_report_artifacts(artifacts: list[dict[str, str]]) -> dict[str, Any]:
+    groups: list[dict[str, Any]] = []
+    for category in REPORT_CATEGORY_ORDER:
+        members = [artifact for artifact in artifacts if artifact.get("category") == category]
+        if not members:
+            continue
+        groups.append(
+            {
+                "key": category,
+                "title": REPORT_CATEGORY_TITLES.get(category, category.title()),
+                "count": len(members),
+                "artifacts": members,
+            }
+        )
+    return {
+        "count": len(artifacts),
+        "groups": groups,
+    }
+
+
+def _build_stack_config(stack: str) -> dict[str, Any]:
+    if stack == "fmp":
+        from examples.run_fmp_mcp_stack import build_config
+
+        return build_config()
+    if stack == "grounded":
+        from examples.run_grounded_stack import build_config
+
+        return build_config()
+    raise ValueError(f"Unknown stack: {stack}")
+
+
+def _technical_artifact_payload(
+    *,
+    slug: str,
+    title: str,
+    md_path: Path,
+    html_path: Path,
+    public_base_url: Optional[str],
+) -> dict[str, str]:
+    return {
+        "slug": slug,
+        "title": title,
+        "category": "technical",
+        "markdown_path": md_path.name,
+        "html_path": html_path.name,
+        "markdown_url": _join_public_url(public_base_url, md_path.name) or "",
+        "html_url": _join_public_url(public_base_url, html_path.name) or "",
+    }
+
+
+def _parse_csv_records(tool_output: str) -> list[dict[str, str]]:
+    csv_lines = [line for line in tool_output.splitlines() if line.strip() and not line.startswith("#")]
+    if not csv_lines:
+        return []
+    return list(csv.DictReader(io.StringIO("\n".join(csv_lines))))
+
+
+def _coerce_numeric_series(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    for column in columns:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame
+
+
+def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = losses.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    return 100 - (100 / (1 + rs))
+
+
+def _series_points(frame: pd.DataFrame, column: str) -> list[dict[str, Any]]:
+    if column not in frame.columns:
+        return []
+    subset = frame[["time", column]].dropna()
+    return [
+        {"time": row["time"], "value": round(float(row[column]), 6)}
+        for _, row in subset.iterrows()
+    ]
+
+
+def _histogram_points(frame: pd.DataFrame, column: str) -> list[dict[str, Any]]:
+    if column not in frame.columns:
+        return []
+    subset = frame[["time", column]].dropna()
+    return [
+        {
+            "time": row["time"],
+            "value": round(float(row[column]), 6),
+            "color": "#22c55e" if float(row[column]) >= 0 else "#ef4444",
+        }
+        for _, row in subset.iterrows()
+    ]
+
+
+def load_recent_earnings_anchor(ticker: str, analysis_date: str, stack: str) -> dict[str, Any]:
+    config = _build_stack_config(stack)
+    set_config(config)
+    try:
+        anchor = get_recent_earnings_anchor_data(ticker, analysis_date)
+    except Exception:
+        return {}
+    return anchor or {}
+
+
+def _compute_avwap_from_anchor(frame: pd.DataFrame, anchor_date: str) -> pd.Series:
+    if not anchor_date or frame.empty:
+        return pd.Series(float("nan"), index=frame.index, dtype="float64")
+    if "date" not in frame.columns or "volume" not in frame.columns:
+        return pd.Series(float("nan"), index=frame.index, dtype="float64")
+
+    anchor_mask = frame["date"] >= anchor_date
+    price_basis = frame.get("vwap")
+    if price_basis is None:
+        price_basis = (frame["high"] + frame["low"] + frame["close"]) / 3
+    weighted = price_basis * frame["volume"]
+    anchor_weighted = weighted.where(anchor_mask)
+    anchor_volume = frame["volume"].where(anchor_mask)
+    cumulative_volume = anchor_volume.cumsum()
+    avwap = anchor_weighted.cumsum() / cumulative_volume.replace(0, pd.NA)
+    avwap = avwap.where(anchor_mask)
+    return avwap
+
+
+def load_massive_chart_data(
+    ticker: str,
+    analysis_date: str,
+    *,
+    stack: str,
+    look_back_days: int = TECHNICAL_CHART_LOOKBACK_DAYS,
+) -> dict[str, Any]:
+    config = _build_stack_config(stack)
+    config.setdefault("data_vendors", {})["core_stock_apis"] = "massive"
+    config.setdefault("tool_vendors", {})["get_stock_data"] = "massive"
+    set_config(config)
+
+    end_dt = datetime.strptime(analysis_date, "%Y-%m-%d")
+    start_date = (end_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
+    stock_csv = route_to_vendor("get_stock_data", ticker, start_date, analysis_date)
+    rows = _parse_csv_records(stock_csv)
+    if not rows:
+        raise ValueError(f"No Massive OHLCV data returned for {ticker} between {start_date} and {analysis_date}")
+
+    frame = pd.DataFrame(rows)
+    required_columns = ["date", "open", "high", "low", "close", "volume"]
+    missing = [column for column in required_columns if column not in frame.columns]
+    if missing:
+        raise ValueError(f"Massive OHLCV data missing required columns: {', '.join(missing)}")
+
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame = _coerce_numeric_series(frame, ["open", "high", "low", "close", "volume", "vwap"])
+    frame = frame.dropna(subset=["date", "open", "high", "low", "close"]).sort_values("date").reset_index(drop=True)
+    if frame.empty:
+        raise ValueError(f"Massive OHLCV data for {ticker} was empty after normalization")
+    frame["date"] = frame["date"].dt.strftime("%Y-%m-%d")
+
+    close = frame["close"]
+    high = frame["high"]
+    low = frame["low"]
+    volume = frame["volume"].fillna(0)
+
+    frame["ema10"] = close.ewm(span=10, adjust=False).mean()
+    frame["sma50"] = close.rolling(window=50, min_periods=50).mean()
+    frame["sma200"] = close.rolling(window=200, min_periods=200).mean()
+    frame["boll_mid"] = close.rolling(window=20, min_periods=20).mean()
+    boll_std = close.rolling(window=20, min_periods=20).std()
+    frame["boll_upper"] = frame["boll_mid"] + (boll_std * 2)
+    frame["boll_lower"] = frame["boll_mid"] - (boll_std * 2)
+    volume_sum = volume.rolling(window=20, min_periods=20).sum()
+    frame["vwma20"] = (close * volume).rolling(window=20, min_periods=20).sum() / volume_sum.where(volume_sum != 0)
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    frame["macd"] = ema12 - ema26
+    frame["macd_signal"] = frame["macd"].ewm(span=9, adjust=False).mean()
+    frame["macd_hist"] = frame["macd"] - frame["macd_signal"]
+    frame["rsi14"] = _compute_rsi(close, 14)
+
+    earnings_anchor = load_recent_earnings_anchor(ticker, analysis_date, stack)
+    frame["avwap_from_earnings"] = _compute_avwap_from_anchor(frame, str(earnings_anchor.get("anchor_date") or ""))
+
+    prev_close = close.shift(1)
+    true_range = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    frame["atr14"] = true_range.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    frame["time"] = frame["date"]
+
+    candles = [
+        {
+            "time": row["time"],
+            "open": round(float(row["open"]), 6),
+            "high": round(float(row["high"]), 6),
+            "low": round(float(row["low"]), 6),
+            "close": round(float(row["close"]), 6),
+        }
+        for _, row in frame.iterrows()
+    ]
+    latest = frame.iloc[-1]
+    indicator_snapshot = {
+        "close": round(float(latest["close"]), 6),
+        "ema10": round(float(latest["ema10"]), 6) if pd.notna(latest["ema10"]) else None,
+        "sma50": round(float(latest["sma50"]), 6) if pd.notna(latest["sma50"]) else None,
+        "sma200": round(float(latest["sma200"]), 6) if pd.notna(latest["sma200"]) else None,
+        "boll_upper": round(float(latest["boll_upper"]), 6) if pd.notna(latest["boll_upper"]) else None,
+        "boll_mid": round(float(latest["boll_mid"]), 6) if pd.notna(latest["boll_mid"]) else None,
+        "boll_lower": round(float(latest["boll_lower"]), 6) if pd.notna(latest["boll_lower"]) else None,
+        "vwma20": round(float(latest["vwma20"]), 6) if pd.notna(latest["vwma20"]) else None,
+        "avwap_from_earnings": round(float(latest["avwap_from_earnings"]), 6) if pd.notna(latest["avwap_from_earnings"]) else None,
+        "rsi14": round(float(latest["rsi14"]), 6) if pd.notna(latest["rsi14"]) else None,
+        "macd": round(float(latest["macd"]), 6) if pd.notna(latest["macd"]) else None,
+        "macd_signal": round(float(latest["macd_signal"]), 6) if pd.notna(latest["macd_signal"]) else None,
+        "macd_hist": round(float(latest["macd_hist"]), 6) if pd.notna(latest["macd_hist"]) else None,
+        "atr14": round(float(latest["atr14"]), 6) if pd.notna(latest["atr14"]) else None,
+    }
+    return {
+        "source_vendor": "massive",
+        "start_date": start_date,
+        "end_date": analysis_date,
+        "earnings_anchor": earnings_anchor,
+        "candles": candles,
+        "ema10": _series_points(frame, "ema10"),
+        "sma50": _series_points(frame, "sma50"),
+        "sma200": _series_points(frame, "sma200"),
+        "boll_upper": _series_points(frame, "boll_upper"),
+        "boll_mid": _series_points(frame, "boll_mid"),
+        "boll_lower": _series_points(frame, "boll_lower"),
+        "vwma20": _series_points(frame, "vwma20"),
+        "avwap_from_earnings": _series_points(frame, "avwap_from_earnings"),
+        "rsi14": _series_points(frame, "rsi14"),
+        "macd": _series_points(frame, "macd"),
+        "macd_signal": _series_points(frame, "macd_signal"),
+        "macd_hist": _histogram_points(frame, "macd_hist"),
+        "indicator_snapshot": indicator_snapshot,
+    }
+
+
+def render_technical_chart_html(title: str, ticker: str, analysis_date: str, chart_data: dict[str, Any]) -> str:
+    escaped_title = html.escape(title)
+    escaped_ticker = html.escape(ticker)
+    escaped_date = html.escape(analysis_date)
+    payload = json.dumps(chart_data, separators=(",", ":")).replace("</", "<\\/")
+    template = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>__TITLE__</title>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; background:#0b1020; color:#e5e7eb; font-family:Inter,system-ui,sans-serif; }
+    main { max-width: 1280px; margin: 0 auto; padding: 24px; }
+    a { color:#93c5fd; }
+    .hero, .panel { background:#111827; border:1px solid #1f2937; border-radius:16px; padding:20px; margin-bottom:18px; }
+    .meta { color:#94a3b8; display:flex; flex-wrap:wrap; gap:14px; margin-top:8px; }
+    .stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:12px; margin-top:18px; }
+    .stat { background:#0b1222; border:1px solid #243045; border-radius:12px; padding:12px; }
+    .stat-label { display:block; font-size:12px; color:#94a3b8; margin-bottom:6px; }
+    .stat-value { font-size:20px; font-weight:700; }
+    .chart-wrap { display:grid; gap:14px; }
+    .chart-box { background:#0b1222; border:1px solid #243045; border-radius:14px; padding:10px; }
+    .chart-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; margin-bottom:8px; }
+    .chart-title { font-size:14px; color:#cbd5e1; margin:0; }
+    .legend { display:flex; flex-wrap:wrap; gap:8px; }
+    .legend-item { display:inline-flex; align-items:center; gap:6px; background:#111827; border:1px solid #243045; border-radius:999px; padding:4px 10px; font-size:12px; color:#cbd5e1; }
+    .legend-swatch { width:10px; height:10px; border-radius:999px; flex:0 0 auto; }
+    .legend-value { color:#93c5fd; font-variant-numeric:tabular-nums; }
+    .chart { width:100%; height:100%; }
+    #priceChart { height:520px; }
+    #rsiChart { height:180px; }
+    #macdChart { height:220px; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <p><a href="index.html">← Back to run index</a> · <a href="technical-indicators-report.html">Technical indicators report</a></p>
+      <h1>__TITLE__</h1>
+      <div class="meta">
+        <span>Ticker: <strong>__TICKER__</strong></span>
+        <span>Analysis date: <strong>__DATE__</strong></span>
+        <span>Source vendor: <strong>Massive MCP</strong></span>
+        <span>Lookback: <strong>__LOOKBACK__ calendar days</strong></span>
+      </div>
+      <div id="stats" class="stats"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Interactive chart</h2>
+      <p>This view uses TradingView Lightweight Charts with Massive daily OHLCV bars. Overlays: 10 EMA, 50 SMA, 200 SMA, Bollinger Bands, and VWMA(20). When a recent company earnings anchor exists, the chart also adds an earnings-anchored AVWAP. Lower panes: RSI(14) and MACD (12,26,9).</p>
+      <div class="chart-wrap">
+        <div class="chart-box"><div class="chart-head"><h3 class="chart-title">Price + overlays</h3><div id="priceLegend" class="legend"></div></div><div id="priceChart" class="chart"></div></div>
+        <div class="chart-box"><div class="chart-head"><h3 class="chart-title">RSI (14)</h3><div id="rsiLegend" class="legend"></div></div><div id="rsiChart" class="chart"></div></div>
+        <div class="chart-box"><div class="chart-head"><h3 class="chart-title">MACD (12, 26, 9)</h3><div id="macdLegend" class="legend"></div></div><div id="macdChart" class="chart"></div></div>
+      </div>
+    </section>
+  </main>
+  <script id="chart-data" type="application/json">__PAYLOAD__</script>
+  <script>
+    const data = JSON.parse(document.getElementById('chart-data').textContent);
+    const commonLayout = {
+      layout: { background: { color: '#0b1222' }, textColor: '#d1d5db' },
+      grid: { vertLines: { color: '#1f2937' }, horzLines: { color: '#1f2937' } },
+      rightPriceScale: { borderColor: '#334155' },
+      timeScale: { borderColor: '#334155', timeVisible: true, secondsVisible: false },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    };
+
+    function createChart(id) {
+      const el = document.getElementById(id);
+      return LightweightCharts.createChart(el, { ...commonLayout, width: el.clientWidth, height: el.clientHeight });
+    }
+
+    function fmt(value) {
+      return value === null || value === undefined || Number.isNaN(value) ? '—' : Number(value).toFixed(2);
+    }
+
+    function addLegendItem(containerId, label, color, value) {
+      const item = document.createElement('div');
+      item.className = 'legend-item';
+      item.innerHTML = `<span class="legend-swatch" style="background:${color}"></span><span>${label}</span><span class="legend-value">${fmt(value)}</span>`;
+      document.getElementById(containerId).appendChild(item);
+    }
+
+    const hasEarningsAnchor = Boolean(data.earnings_anchor && data.earnings_anchor.anchor_label);
+    const stats = [
+      ['Close', data.indicator_snapshot.close],
+      ['10 EMA', data.indicator_snapshot.ema10],
+      ['50 SMA', data.indicator_snapshot.sma50],
+      ['200 SMA', data.indicator_snapshot.sma200],
+      ...(hasEarningsAnchor ? [['AVWAP from earnings', data.indicator_snapshot.avwap_from_earnings]] : []),
+      ['RSI (14)', data.indicator_snapshot.rsi14],
+      ['MACD', data.indicator_snapshot.macd],
+      ['Signal', data.indicator_snapshot.macd_signal],
+      ['Histogram', data.indicator_snapshot.macd_hist],
+      ['ATR (14)', data.indicator_snapshot.atr14],
+    ];
+    const statsEl = document.getElementById('stats');
+    if (hasEarningsAnchor) {
+      const anchorCard = document.createElement('div');
+      anchorCard.className = 'stat';
+      anchorCard.innerHTML = `<span class="stat-label">Earnings anchor</span><span class="stat-value" style="font-size:16px">${data.earnings_anchor.anchor_label}</span>`;
+      statsEl.appendChild(anchorCard);
+    }
+    for (const [label, value] of stats) {
+      const card = document.createElement('div');
+      card.className = 'stat';
+      card.innerHTML = `<span class="stat-label">${label}</span><span class="stat-value">${fmt(value)}</span>`;
+      statsEl.appendChild(card);
+    }
+
+    addLegendItem('priceLegend', 'Candles / Close', '#22c55e', data.indicator_snapshot.close);
+    addLegendItem('priceLegend', 'EMA 10', '#38bdf8', data.indicator_snapshot.ema10);
+    addLegendItem('priceLegend', 'SMA 50', '#f59e0b', data.indicator_snapshot.sma50);
+    addLegendItem('priceLegend', 'SMA 200', '#f97316', data.indicator_snapshot.sma200);
+    addLegendItem('priceLegend', 'Boll Upper', '#a78bfa', data.indicator_snapshot.boll_upper);
+    addLegendItem('priceLegend', 'Boll Mid', '#c084fc', data.indicator_snapshot.boll_mid);
+    addLegendItem('priceLegend', 'Boll Lower', '#a78bfa', data.indicator_snapshot.boll_lower);
+    addLegendItem('priceLegend', 'VWMA 20', '#14b8a6', data.indicator_snapshot.vwma20);
+    if (hasEarningsAnchor) {
+      addLegendItem('priceLegend', 'AVWAP (earnings)', '#f472b6', data.indicator_snapshot.avwap_from_earnings);
+    }
+    addLegendItem('rsiLegend', 'RSI 14', '#60a5fa', data.indicator_snapshot.rsi14);
+    addLegendItem('rsiLegend', 'Overbought', '#64748b', 70);
+    addLegendItem('rsiLegend', 'Oversold', '#64748b', 30);
+    addLegendItem('macdLegend', 'MACD', '#34d399', data.indicator_snapshot.macd);
+    addLegendItem('macdLegend', 'Signal', '#f59e0b', data.indicator_snapshot.macd_signal);
+    addLegendItem('macdLegend', 'Histogram', '#22c55e', data.indicator_snapshot.macd_hist);
+
+    const priceChart = createChart('priceChart');
+    const rsiChart = createChart('rsiChart');
+    const macdChart = createChart('macdChart');
+
+    const candleSeries = priceChart.addCandlestickSeries({
+      upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+      lastValueVisible: false, priceLineVisible: false
+    });
+    candleSeries.setData(data.candles || []);
+
+    const lineConfigs = [
+      ['ema10', '#38bdf8', 2],
+      ['sma50', '#f59e0b', 2],
+      ['sma200', '#f97316', 2],
+      ['boll_upper', '#a78bfa', 1],
+      ['boll_mid', '#c084fc', 1],
+      ['boll_lower', '#a78bfa', 1],
+      ['vwma20', '#14b8a6', 2],
+      ...(hasEarningsAnchor ? [['avwap_from_earnings', '#f472b6', 2]] : []),
+    ];
+    for (const [key, color, width] of lineConfigs) {
+      const series = priceChart.addLineSeries({ color, lineWidth: width, lastValueVisible: false, priceLineVisible: false });
+      series.setData(data[key] || []);
+    }
+
+    const rsiSeries = rsiChart.addLineSeries({ color: '#60a5fa', lineWidth: 2, lastValueVisible: false, priceLineVisible: false });
+    rsiSeries.setData(data.rsi14 || []);
+    const rsiUpper = rsiChart.addLineSeries({ color: '#64748b', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, lastValueVisible: false, priceLineVisible: false });
+    rsiUpper.setData((data.rsi14 || []).map(point => ({ time: point.time, value: 70 })));
+    const rsiLower = rsiChart.addLineSeries({ color: '#64748b', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, lastValueVisible: false, priceLineVisible: false });
+    rsiLower.setData((data.rsi14 || []).map(point => ({ time: point.time, value: 30 })));
+
+    const macdHistSeries = macdChart.addHistogramSeries({ priceFormat: { type: 'price', precision: 2, minMove: 0.01 }, lastValueVisible: false, priceLineVisible: false });
+    macdHistSeries.setData(data.macd_hist || []);
+    const macdSeries = macdChart.addLineSeries({ color: '#34d399', lineWidth: 2, lastValueVisible: false, priceLineVisible: false });
+    macdSeries.setData(data.macd || []);
+    const signalSeries = macdChart.addLineSeries({ color: '#f59e0b', lineWidth: 2, lastValueVisible: false, priceLineVisible: false });
+    signalSeries.setData(data.macd_signal || []);
+
+    priceChart.timeScale().fitContent();
+    const charts = [priceChart, rsiChart, macdChart];
+    let syncing = false;
+    for (const chart of charts) {
+      chart.timeScale().subscribeVisibleTimeRangeChange(range => {
+        if (syncing || !range) return;
+        syncing = true;
+        for (const other of charts) {
+          if (other !== chart) other.timeScale().setVisibleRange(range);
+        }
+        syncing = false;
+      });
+    }
+
+    function resizeCharts() {
+      priceChart.applyOptions({ width: document.getElementById('priceChart').clientWidth });
+      rsiChart.applyOptions({ width: document.getElementById('rsiChart').clientWidth });
+      macdChart.applyOptions({ width: document.getElementById('macdChart').clientWidth });
+    }
+    window.addEventListener('resize', resizeCharts);
+  </script>
+</body>
+</html>
+"""
+    return (
+        template.replace("__TITLE__", escaped_title)
+        .replace("__TICKER__", escaped_ticker)
+        .replace("__DATE__", escaped_date)
+        .replace("__LOOKBACK__", str(TECHNICAL_CHART_LOOKBACK_DAYS))
+        .replace("__PAYLOAD__", payload)
+    )
+
+
+def write_technical_chart_artifact(
+    run_dir: Path,
+    ticker: str,
+    analysis_date: str,
+    *,
+    stack: str,
+    public_base_url: Optional[str] = None,
+) -> dict[str, str]:
+    slug = "technical-chart"
+    title = "Technical Chart"
+    md_path = run_dir / f"{slug}.md"
+    html_path = run_dir / f"{slug}.html"
+    if md_path.exists() and html_path.exists():
+        return _technical_artifact_payload(
+            slug=slug,
+            title=title,
+            md_path=md_path,
+            html_path=html_path,
+            public_base_url=public_base_url,
+        )
+    chart_data = load_massive_chart_data(ticker, analysis_date, stack=stack)
+    earnings_anchor = chart_data.get("earnings_anchor") or {}
+    has_earnings_anchor = bool(earnings_anchor.get("anchor_label"))
+
+    markdown_lines = [
+        f"# {title}",
+        "",
+        f"- **Ticker:** `{ticker}`",
+        f"- **Analysis date:** `{analysis_date}`",
+        "- **Source vendor:** `massive`",
+        f"- **Lookback window:** `{TECHNICAL_CHART_LOOKBACK_DAYS}` calendar days",
+    ]
+    if has_earnings_anchor:
+        markdown_lines.append(f"- **AVWAP from earnings:** `{earnings_anchor['anchor_label']}`")
+    markdown_lines.extend(
+        [
+            "",
+            "Open `technical-chart.html` for the interactive TradingView Lightweight Charts view.",
+            "",
+            "Included studies:",
+            "- Candles",
+            "- 10 EMA",
+            "- 50 SMA",
+            "- 200 SMA",
+            "- Bollinger Bands (20, 2)",
+            "- VWMA (20)",
+        ]
+    )
+    if has_earnings_anchor:
+        markdown_lines.append("- AVWAP from the most recent earnings anchor")
+    markdown_lines.extend(
+        [
+            "- RSI (14)",
+            "- MACD (12, 26, 9)",
+        ]
+    )
+    markdown_body = "\n".join(markdown_lines) + "\n"
+    md_path.write_text(markdown_body, encoding="utf-8")
+    html_path.write_text(
+        render_technical_chart_html(f"{title}: {ticker} @ {analysis_date}", ticker, analysis_date, chart_data),
+        encoding="utf-8",
+    )
+    return {
+        "slug": slug,
+        "title": title,
+        "category": "technical",
+        "markdown_path": md_path.name,
+        "html_path": html_path.name,
+        "markdown_url": _join_public_url(public_base_url, md_path.name) or "",
+        "html_url": _join_public_url(public_base_url, html_path.name) or "",
+    }
+
+
+def write_technical_indicators_artifact(
+    run_dir: Path,
+    ticker: str,
+    analysis_date: str,
+    *,
+    stack: str,
+    public_base_url: Optional[str] = None,
+    look_back_days: int = 30,
+) -> dict[str, str]:
+    slug = "technical-indicators-report"
+    title = "Technical Indicators Report"
+    md_path = run_dir / f"{slug}.md"
+    html_path = run_dir / f"{slug}.html"
+    if md_path.exists() and html_path.exists():
+        return _technical_artifact_payload(
+            slug=slug,
+            title=title,
+            md_path=md_path,
+            html_path=html_path,
+            public_base_url=public_base_url,
+        )
+
+    config = _build_stack_config(stack)
+    set_config(config)
+    vendor = get_vendor("technical_indicators", "get_indicators")
+
+    sections = [
+        f"# {title}",
+        "",
+        f"- **Ticker:** `{ticker}`",
+        f"- **Analysis date:** `{analysis_date}`",
+        f"- **Configured vendor:** `{vendor}`",
+        f"- **Lookback window:** `{look_back_days}` calendar days",
+        "",
+        "This artifact is published separately from the narrative market report so the underlying technical calculations are always explicit and easy to review.",
+        "",
+    ]
+    for indicator, label in TECHNICAL_INDICATORS:
+        sections.extend(
+            [
+                f"## {label} (`{indicator}`)",
+                "",
+                "```text",
+                route_to_vendor("get_indicators", ticker, indicator, analysis_date, look_back_days).strip(),
+                "```",
+                "",
+            ]
+        )
+
+    body = "\n".join(sections).strip() + "\n"
+    md_path.write_text(body, encoding="utf-8")
+    html_path.write_text(
+        render_markdown_html(f"{title}: {ticker} @ {analysis_date}", body),
+        encoding="utf-8",
+    )
+    return _technical_artifact_payload(
+        slug=slug,
+        title=title,
+        md_path=md_path,
+        html_path=html_path,
+        public_base_url=public_base_url,
+    )
+
+
+def write_report_artifacts(
+    run_dir: Path,
+    ticker: str,
+    analysis_date: str,
+    state: dict[str, Any],
+    *,
+    public_base_url: Optional[str] = None,
+) -> list[dict[str, str]]:
     artifacts: list[dict[str, str]] = []
     for spec in REPORT_ARTIFACT_SPECS:
         body = spec.extractor(state)
@@ -189,8 +817,11 @@ def write_report_artifacts(run_dir: Path, ticker: str, analysis_date: str, state
             {
                 "slug": spec.slug,
                 "title": spec.title,
+                "category": spec.category,
                 "markdown_path": md_path.name,
                 "html_path": html_path.name,
+                "markdown_url": _join_public_url(public_base_url, md_path.name) or "",
+                "html_url": _join_public_url(public_base_url, html_path.name) or "",
             }
         )
     return artifacts
@@ -209,14 +840,49 @@ def publish_runtime_artifacts(
     ticker: str,
     analysis_date: str,
     state_log: Path,
+    public_base_url: Optional[str] = None,
 ) -> None:
+    artifacts: list[dict[str, str]] = []
+    try:
+        artifacts.append(
+            write_technical_indicators_artifact(
+                run_dir,
+                ticker,
+                analysis_date,
+                stack=metadata.get("stack", "fmp"),
+                public_base_url=public_base_url,
+            )
+        )
+    except Exception as exc:
+        append_artifact_warning(metadata, f"technical indicators artifact failed: {exc}")
+    try:
+        artifacts.append(
+            write_technical_chart_artifact(
+                run_dir,
+                ticker,
+                analysis_date,
+                stack=metadata.get("stack", "fmp"),
+                public_base_url=public_base_url,
+            )
+        )
+    except Exception as exc:
+        append_artifact_warning(metadata, f"technical chart artifact failed: {exc}")
+
     state = load_state_log(state_log)
-    if not state:
-        return
-    state_log_copy = run_dir / state_log.name
-    state_log_copy.write_text(state_log.read_text(encoding="utf-8"), encoding="utf-8")
-    metadata["state_log"] = state_log_copy.name
-    metadata["report_artifacts"] = write_report_artifacts(run_dir, ticker, analysis_date, state)
+    if state:
+        state_log_copy = run_dir / state_log.name
+        state_log_copy.write_text(state_log.read_text(encoding="utf-8"), encoding="utf-8")
+        metadata["state_log"] = state_log_copy.name
+        artifacts = write_report_artifacts(
+            run_dir,
+            ticker,
+            analysis_date,
+            state,
+            public_base_url=public_base_url,
+        ) + artifacts
+
+    metadata["report_artifacts"] = artifacts
+    metadata["report_summary"] = summarize_report_artifacts(artifacts)
     write_metadata(metadata_path, metadata)
     index_path.write_text(render_index_html(metadata), encoding="utf-8")
 
@@ -266,6 +932,11 @@ def render_live_html(title: str) -> str:
     .markdown th, .markdown td {{ border:1px solid #263244; padding:8px 10px; text-align:left; vertical-align:top; }}
     .markdown blockquote {{ border-left:4px solid #374151; margin-left:0; padding-left:16px; color:#cbd5e1; }}
     .raw-log {{ max-height:70vh; overflow:auto; white-space:pre-wrap; word-break:break-word; background:#0b1222; border:1px solid #243045; border-radius:12px; padding:14px; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; line-height:1.5; }}
+    .report-groups {{ display:grid; gap:14px; margin-top:16px; }}
+    .report-group {{ background:#0b1222; border:1px solid #243045; border-radius:12px; padding:12px; }}
+    .report-group h3 {{ margin:0 0 8px 0; font-size:14px; }}
+    .report-group ul {{ margin:0; padding-left:18px; }}
+    .report-group li {{ margin:6px 0; }}
     .muted {{ color:#94a3b8; }}
     @media (max-width: 980px) {{ .grid {{ grid-template-columns:1fr; }} }}
   </style>
@@ -300,6 +971,15 @@ def render_live_html(title: str) -> str:
             <div class=\"stat\"><span class=\"stat-label\">AI blocks</span><span class=\"stat-value\" id=\"aiCount\">0</span></div>
             <div class=\"stat\"><span class=\"stat-label\">Final sections</span><span class=\"stat-value\" id=\"finalCount\">0</span></div>
           </div>
+          <div class=\"report-groups\">
+            <div>
+              <strong>Published reports</strong>
+              <div id=\"reportCount\" class=\"muted\">Waiting for artifacts…</div>
+            </div>
+            <div id=\"reportGroups\" class=\"report-groups\">
+              <div class=\"report-group muted\">No reports published yet.</div>
+            </div>
+          </div>
           <p class=\"muted\" style=\"margin-top:16px\">Color coding: blue = human, amber = tool calls, indigo = AI output, green = final recommendation.</p>
           <details style=\"margin-top:18px\">
             <summary>Raw log</summary>
@@ -318,6 +998,8 @@ def render_live_html(title: str) -> str:
     const toolCountEl = document.getElementById('toolCount');
     const aiCountEl = document.getElementById('aiCount');
     const finalCountEl = document.getElementById('finalCount');
+    const reportCountEl = document.getElementById('reportCount');
+    const reportGroupsEl = document.getElementById('reportGroups');
 
     function escapeHtml(value) {{
       return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -429,6 +1111,38 @@ def render_live_html(title: str) -> str:
       finalCountEl.textContent = String(final);
     }}
 
+    function renderReportArtifacts(meta) {{
+      const summary = meta.report_summary || {{}};
+      const groups = summary.groups || [];
+      const artifacts = meta.report_artifacts || [];
+      reportCountEl.textContent = `${{summary.count || artifacts.length || 0}} reports published.`;
+      reportGroupsEl.replaceChildren();
+      if (!groups.length) {{
+        const empty = document.createElement('div');
+        empty.className = 'report-group muted';
+        empty.textContent = 'No reports published yet.';
+        reportGroupsEl.appendChild(empty);
+        return;
+      }}
+      for (const group of groups) {{
+        const card = document.createElement('section');
+        card.className = 'report-group';
+        const heading = document.createElement('h3');
+        heading.textContent = group.title || 'Reports';
+        card.appendChild(heading);
+        const list = document.createElement('ul');
+        for (const artifact of group.artifacts || []) {{
+          const item = document.createElement('li');
+          const htmlHref = artifact.html_url || artifact.html_path || '#';
+          const mdHref = artifact.markdown_url || artifact.markdown_path || '#';
+          item.innerHTML = `<strong>${{escapeHtml(artifact.title || artifact.slug || 'Report')}}</strong>: <a href="${{htmlHref}}">HTML</a> · <a href="${{mdHref}}">Markdown</a>`;
+          list.appendChild(item);
+        }}
+        card.appendChild(list);
+        reportGroupsEl.appendChild(card);
+      }}
+    }}
+
     async function refresh() {{
       try {{
         const [logResp, metaResp] = await Promise.all([
@@ -441,6 +1155,7 @@ def render_live_html(title: str) -> str:
         const meta = await metaResp.json();
         statusEl.textContent = meta.status || 'unknown';
         durationEl.textContent = 'Duration: ' + (meta.duration_hms || '--');
+        renderReportArtifacts(meta);
         window.scrollTo(0, document.body.scrollHeight);
       }} catch (err) {{
         statusEl.textContent = 'refresh failed';
@@ -456,31 +1171,43 @@ def render_live_html(title: str) -> str:
 
 def render_index_html(metadata: dict) -> str:
     title = html.escape(metadata.get("title", "Ticker Agents Run"))
+    report_artifacts = metadata.get("report_artifacts", []) or []
+    report_summary_meta = metadata.get("report_summary") or summarize_report_artifacts(report_artifacts)
     links = [
-        ("Live HTML", "live.html"),
-        ("Raw console text", "console.txt"),
+        ("Live HTML", metadata.get("live_url") or "live.html"),
+        ("Raw console text", metadata.get("raw_url") or "console.txt"),
         ("Run metadata", "metadata.json"),
     ]
     if metadata.get("state_log"):
         links.append(("Full state log", metadata["state_log"]))
     if metadata.get("has_final_markdown"):
-        links.append(("Rendered final decision", "final.html"))
-        links.append(("Final decision markdown", "final.md"))
-    for artifact in metadata.get("report_artifacts", []):
-        links.append((f"{artifact['title']} (HTML)", artifact["html_path"]))
-        links.append((f"{artifact['title']} (Markdown)", artifact["markdown_path"]))
+        links.append(("Rendered final decision", metadata.get("final_html_url") or "final.html"))
+        links.append(("Final decision markdown", metadata.get("final_md_url") or "final.md"))
+    for artifact in report_artifacts:
+        links.append((f"{artifact['title']} (HTML)", artifact.get("html_url") or artifact["html_path"]))
+        links.append((f"{artifact['title']} (Markdown)", artifact.get("markdown_url") or artifact["markdown_path"]))
     link_html = "".join(f'<li><a href="{href}">{label}</a></li>' for label, href in links)
     report_summary = ""
-    if metadata.get("report_artifacts"):
-        report_items = "".join(
-            (
-                f'<li><strong>{html.escape(artifact["title"])}</strong>: '
-                f'<a href="{artifact["html_path"]}">HTML</a> · '
-                f'<a href="{artifact["markdown_path"]}">Markdown</a></li>'
+    if report_artifacts:
+        total_reports = report_summary_meta.get("count", len(report_artifacts))
+        grouped_blocks = []
+        for group in report_summary_meta.get("groups", []):
+            items = "".join(
+                (
+                    f'<li><strong>{html.escape(artifact["title"])}</strong>: '
+                    f'<a href="{artifact.get("html_url") or artifact["html_path"]}">HTML</a> · '
+                    f'<a href="{artifact.get("markdown_url") or artifact["markdown_path"]}">Markdown</a></li>'
+                )
+                for artifact in group.get("artifacts", [])
             )
-            for artifact in metadata["report_artifacts"]
+            grouped_blocks.append(
+                f'<section><h3>{html.escape(group.get("title", "Reports"))}</h3><ul>{items}</ul></section>'
+            )
+        report_summary = (
+            f"<h2>Published reports</h2>"
+            f"<p>{total_reports} reports published.</p>"
+            + "".join(grouped_blocks)
         )
-        report_summary = f"<h2>Published reports</h2><ul>{report_items}</ul>"
     details = "".join(
         f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>"
         for k, v in [
@@ -667,8 +1394,11 @@ def run(argv: Optional[list[str]] = None) -> int:
         "live_url": live_url,
         "index_url": index_url,
         "raw_url": raw_url,
+        "final_html_url": f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}/final.html",
+        "final_md_url": f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}/final.md",
         "has_final_markdown": False,
         "report_artifacts": [],
+        "report_summary": {"count": 0, "groups": []},
         "state_log": None,
         "artifact_warning": None,
     }
@@ -705,6 +1435,7 @@ def run(argv: Optional[list[str]] = None) -> int:
                 ticker=ticker,
                 analysis_date=analysis_date,
                 state_log=state_log,
+                public_base_url=f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}",
             )
         except Exception as exc:
             warning = f"runtime report publish failed: {exc}"
@@ -712,6 +1443,8 @@ def run(argv: Optional[list[str]] = None) -> int:
                 append_artifact_warning(metadata, warning)
                 runtime_publish_warning = warning
         last_runtime_publish_at = now
+
+    maybe_publish_runtime_artifacts(force=True)
 
     try:
         with paths.console_txt.open("w", encoding="utf-8") as out_handle:

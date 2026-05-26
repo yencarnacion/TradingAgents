@@ -3,6 +3,7 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from tradingagents.dataflows import massive
+from tradingagents.dataflows.fmp import get_recent_earnings_anchor as get_fmp_recent_earnings_anchor
 
 
 @tool
@@ -81,3 +82,12 @@ def get_options_chain(
         strike_window=strike_window,
         limit=limit,
     )
+
+
+@tool
+def get_recent_earnings_anchor(
+    symbol: Annotated[str, "Ticker symbol of the company"],
+    curr_date: Annotated[str, "Trading date in YYYY-MM-DD format"],
+) -> str:
+    """Retrieve the latest completed earnings date to use as an AVWAP anchor."""
+    return get_fmp_recent_earnings_anchor(symbol, curr_date)

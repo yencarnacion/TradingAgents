@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import requests
 
 from .config import get_config
@@ -22,6 +23,73 @@ _SESSION_WINDOWS = {
     "afterhours": ((16, 1), (19, 59)),
 }
 _DEFAULT_SECTOR_ETFS = ("XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU")
+_INDICATOR_DESCRIPTIONS = {
+    "close_50_sma": (
+        "50 SMA: A medium-term trend indicator. "
+        "Usage: Identify trend direction and serve as dynamic support/resistance. "
+        "Tips: It lags price; combine with faster indicators for timely signals."
+    ),
+    "close_200_sma": (
+        "200 SMA: A long-term trend benchmark. "
+        "Usage: Confirm overall market trend and identify golden/death cross setups. "
+        "Tips: It reacts slowly; best for strategic trend confirmation rather than frequent trading entries."
+    ),
+    "close_10_ema": (
+        "10 EMA: A responsive short-term average. "
+        "Usage: Capture quick shifts in momentum and potential entry points. "
+        "Tips: Prone to noise in choppy markets; use alongside longer averages for filtering false signals."
+    ),
+    "macd": (
+        "MACD: Computes momentum via differences of EMAs. "
+        "Usage: Look for crossovers and divergence as signals of trend changes. "
+        "Tips: Confirm with other indicators in low-volatility or sideways markets."
+    ),
+    "macds": (
+        "MACD Signal: An EMA smoothing of the MACD line. "
+        "Usage: Use crossovers with the MACD line to trigger trades. "
+        "Tips: Should be part of a broader strategy to avoid false positives."
+    ),
+    "macdh": (
+        "MACD Histogram: Shows the gap between the MACD line and its signal. "
+        "Usage: Visualize momentum strength and spot divergence early. "
+        "Tips: Can be volatile; complement with additional filters in fast-moving markets."
+    ),
+    "rsi": (
+        "RSI: Measures momentum to flag overbought/oversold conditions. "
+        "Usage: Apply 70/30 thresholds and watch for divergence to signal reversals. "
+        "Tips: In strong trends, RSI may remain extreme; always cross-check with trend analysis."
+    ),
+    "boll": (
+        "Bollinger Middle: A 20 SMA serving as the basis for Bollinger Bands. "
+        "Usage: Acts as a dynamic benchmark for price movement. "
+        "Tips: Combine with the upper and lower bands to effectively spot breakouts or reversals."
+    ),
+    "boll_ub": (
+        "Bollinger Upper Band: Typically 2 standard deviations above the middle line. "
+        "Usage: Signals potential overbought conditions and breakout zones. "
+        "Tips: Confirm signals with other tools; prices may ride the band in strong trends."
+    ),
+    "boll_lb": (
+        "Bollinger Lower Band: Typically 2 standard deviations below the middle line. "
+        "Usage: Indicates potential oversold conditions. "
+        "Tips: Use additional analysis to avoid false reversal signals."
+    ),
+    "atr": (
+        "ATR: Averages true range to measure volatility. "
+        "Usage: Set stop-loss levels and adjust position sizes based on current market volatility. "
+        "Tips: It's a reactive measure, so use it as part of a broader risk management strategy."
+    ),
+    "vwma": (
+        "VWMA: A moving average weighted by volume. "
+        "Usage: Confirm trends by integrating price action with volume data. "
+        "Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses."
+    ),
+    "mfi": (
+        "MFI: The Money Flow Index is a momentum indicator that uses both price and volume to measure buying and selling pressure. "
+        "Usage: Identify overbought (>80) or oversold (<20) conditions and confirm the strength of trends or reversals. "
+        "Tips: Use alongside RSI or MACD to confirm signals; divergence between price and MFI can indicate potential reversals."
+    ),
+}
 
 
 def _massive_api_key() -> Optional[str]:
@@ -227,6 +295,95 @@ def _to_csv_block(rows: List[Dict[str, Any]]) -> str:
     return buf.getvalue()
 
 
+def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = losses.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    return 100 - (100 / (1 + rs))
+
+
+def _indicator_frame(symbol: str, curr_date: str, look_back_days: int) -> pd.DataFrame:
+    end_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    warmup_days = max(260, look_back_days + 220)
+    start_date = (end_dt - timedelta(days=warmup_days)).strftime("%Y-%m-%d")
+    payload = _request(
+        f"/v2/aggs/ticker/{symbol.upper()}/range/1/day/{start_date}/{curr_date}",
+        params={"adjusted": "true", "sort": "asc", "limit": 5000},
+    )
+    rows = _rows(payload)
+    if not rows:
+        raise RuntimeError(f"No Massive price history returned for {symbol} between {start_date} and {curr_date}")
+
+    normalized = []
+    for row in rows:
+        if row.get("t") not in (None, ""):
+            trade_date = datetime.fromtimestamp(int(float(row["t"])) / 1000, tz=ZoneInfo("UTC")).astimezone(_ET).date().isoformat()
+        else:
+            trade_date = str(row.get("date") or "").split(" ")[0]
+        normalized.append(
+            {
+                "date": trade_date,
+                "open": row.get("o", row.get("open")),
+                "high": row.get("h", row.get("high")),
+                "low": row.get("l", row.get("low")),
+                "close": row.get("c", row.get("close")),
+                "volume": row.get("v", row.get("volume")),
+                "vwap": row.get("vw", row.get("vwap")),
+            }
+        )
+
+    frame = pd.DataFrame(normalized)
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    for column in ["open", "high", "low", "close", "volume", "vwap"]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = (
+        frame.dropna(subset=["date", "open", "high", "low", "close"])
+        .sort_values("date")
+        .drop_duplicates(subset=["date"], keep="last")
+    )
+    if frame.empty:
+        raise RuntimeError(f"Massive price history for {symbol} was empty after normalization")
+
+    close = frame["close"]
+    high = frame["high"]
+    low = frame["low"]
+    volume = frame["volume"].fillna(0)
+    typical_price = (high + low + close) / 3
+
+    frame["close_50_sma"] = close.rolling(window=50, min_periods=50).mean()
+    frame["close_200_sma"] = close.rolling(window=200, min_periods=200).mean()
+    frame["close_10_ema"] = close.ewm(span=10, adjust=False).mean()
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    frame["macd"] = ema12 - ema26
+    frame["macds"] = frame["macd"].ewm(span=9, adjust=False).mean()
+    frame["macdh"] = frame["macd"] - frame["macds"]
+    frame["rsi"] = _compute_rsi(close, 14)
+    frame["boll"] = close.rolling(window=20, min_periods=20).mean()
+    boll_std = close.rolling(window=20, min_periods=20).std()
+    frame["boll_ub"] = frame["boll"] + (boll_std * 2)
+    frame["boll_lb"] = frame["boll"] - (boll_std * 2)
+    prev_close = close.shift(1)
+    true_range = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    frame["atr"] = true_range.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    volume_sum = volume.rolling(window=20, min_periods=20).sum()
+    frame["vwma"] = (close * volume).rolling(window=20, min_periods=20).sum() / volume_sum.where(volume_sum != 0)
+    raw_money_flow = typical_price * volume
+    tp_delta = typical_price.diff()
+    positive_flow = raw_money_flow.where(tp_delta > 0, 0.0)
+    negative_flow = raw_money_flow.where(tp_delta < 0, 0.0).abs()
+    positive_sum = positive_flow.rolling(window=14, min_periods=14).sum()
+    negative_sum = negative_flow.rolling(window=14, min_periods=14).sum()
+    money_ratio = positive_sum / negative_sum.replace(0, pd.NA)
+    frame["mfi"] = 100 - (100 / (1 + money_ratio))
+    frame.loc[(negative_sum == 0) & (positive_sum > 0), "mfi"] = 100.0
+    frame["date_str"] = frame["date"].dt.strftime("%Y-%m-%d")
+    return frame
+
+
 def _clean_value(value: Any) -> Any:
     if value is None:
         return None
@@ -290,6 +447,40 @@ def get_stock_data(symbol: str, start_date: str, end_date: str):
         return _header(f"Stock data for {symbol.upper()} from {start_date} to {end_date}") + _to_csv_block(normalized)
     except Exception as e:
         return f"Error retrieving Massive stock data for {symbol}: {e}"
+
+
+def get_indicators(symbol: str, indicator: str, curr_date: str, look_back_days: int) -> str:
+    if indicator not in _INDICATOR_DESCRIPTIONS:
+        raise ValueError(
+            f"Indicator {indicator} is not supported. Please choose from: {list(_INDICATOR_DESCRIPTIONS.keys())}"
+        )
+
+    end_date = curr_date
+    curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    before = curr_date_dt - timedelta(days=look_back_days)
+
+    try:
+        frame = _indicator_frame(symbol, curr_date, look_back_days)
+        value_map = {}
+        for _, row in frame.iterrows():
+            value = row.get(indicator)
+            value_map[row["date_str"]] = "N/A" if pd.isna(value) else str(round(float(value), 6))
+
+        lines = []
+        current_dt = curr_date_dt
+        while current_dt >= before:
+            date_str = current_dt.strftime("%Y-%m-%d")
+            lines.append(f"{date_str}: {value_map.get(date_str, 'N/A: Not a trading day (weekend or holiday)')}")
+            current_dt -= timedelta(days=1)
+
+        return (
+            f"## {indicator} values from {before.strftime('%Y-%m-%d')} to {end_date}:\n\n"
+            + "\n".join(lines)
+            + "\n\n"
+            + _INDICATOR_DESCRIPTIONS[indicator]
+        )
+    except Exception as e:
+        return f"Error retrieving Massive indicator data for {symbol}: {e}"
 
 
 def get_intraday_bars(symbol: str, trade_date: str, multiplier: int = 5, timespan: str = "minute", limit: int = 5000):

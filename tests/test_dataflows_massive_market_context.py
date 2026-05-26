@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -203,3 +204,28 @@ class TestMassiveMarketContextDataflows:
         assert "Using latest completed session: 2025-05-23" in result
         assert "O:AAPL250523C00195000" in result
         assert "trade_date_close" in result
+
+    def test_get_indicators_computes_supported_series_from_massive_ohlcv(self):
+        rows = []
+        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        for offset in range(260):
+            trade_date = start + timedelta(days=offset)
+            price = 100 + offset
+            rows.append(
+                {
+                    "t": int(trade_date.timestamp() * 1000),
+                    "o": float(price),
+                    "h": float(price + 2),
+                    "l": float(price - 2),
+                    "c": float(price + 1),
+                    "v": float(1000 + offset * 10),
+                    "vw": float(price + 0.5),
+                }
+            )
+
+        with patch.object(massive, "_request", return_value={"results": rows}):
+            result = massive.get_indicators("AAPL", "close_200_sma", "2025-09-17", 3)
+
+        assert "## close_200_sma values from 2025-09-14 to 2025-09-17:" in result
+        assert "2025-09-17:" in result
+        assert "200 SMA: A long-term trend benchmark." in result
