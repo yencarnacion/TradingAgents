@@ -59,11 +59,18 @@ def test_build_app_command_switches_examples(tmp_path):
     assert fmp[-3:] == [str(tmp_path / "examples" / "run_fmp_mcp_stack.py"), "SPY", "2026-05-25"]
 
 
-def test_parse_args_uses_env_default_stack(monkeypatch):
-    monkeypatch.setenv("TICKER_AGENTS_STACK", "fmp")
+def test_parse_args_defaults_to_fmp_stack_when_env_is_unset(monkeypatch):
+    monkeypatch.delenv("TICKER_AGENTS_STACK", raising=False)
     args = parse_args([])
 
     assert args.stack == "fmp"
+
+
+def test_parse_args_uses_env_default_stack(monkeypatch):
+    monkeypatch.setenv("TICKER_AGENTS_STACK", "grounded")
+    args = parse_args([])
+
+    assert args.stack == "grounded"
 
 
 def test_render_live_html_includes_structured_view_hooks():

@@ -59,6 +59,9 @@ def main() -> int:
         if status == "running":
             time.sleep(POLL_SECONDS)
             continue
+        if status in {"interrupted", "cancelled"}:
+            sentinel.write_text(f"suppressed status={status}\n", encoding="utf-8")
+            return 0
 
         if metadata.get("has_final_markdown"):
             metadata["final_url"] = metadata.get("index_url", "").rsplit("/", 1)[0] + "/final.html"

@@ -470,8 +470,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--stack",
         choices=sorted(STACK_EXAMPLES),
-        default=os.getenv("TICKER_AGENTS_STACK", "grounded"),
-        help="Example stack to run: grounded (default) or fmp",
+        default=os.getenv("TICKER_AGENTS_STACK", "fmp"),
+        help="Example stack to run: fmp (default, Massive+FMP hybrid) or grounded",
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="HTTP port for the output viewer")
     return parser.parse_args(argv)

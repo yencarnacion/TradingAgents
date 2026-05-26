@@ -23,7 +23,9 @@ def resolve_inputs(ticker: str | None = None, analysis_date: str | None = None) 
 def build_config():
     # Reuse the existing LAN services instead of local API keys:
     # - local OpenAI-compatible Qwen on 10.17.17.99
-    # - FMP MCP on 10.17.17.90:8086 for price/fundamentals/news/insiders
+    # - Massive MCP on 10.17.17.90:8083 for intraday / options / tape data
+    # - FMP MCP on 10.17.17.90:8086 for fundamentals / news / insiders / macro context
+    # - news/Grok MCP on 10.17.17.90:9081 for X sentiment fallback when no local xAI key is present
     os.environ.setdefault("OPENAI_API_KEY", "dummy")
 
     config = deepcopy(DEFAULT_CONFIG)
@@ -31,13 +33,15 @@ def build_config():
     config["backend_url"] = "http://10.17.17.99:8005/v1"
     config["deep_think_llm"] = "Qwen/Qwen3.6-27B-FP8"
     config["quick_think_llm"] = "Qwen/Qwen3.6-27B-FP8"
+    config["market_data_mcp_url"] = "https://10.17.17.90:8083/mcp"
     config["fmp_mcp_url"] = "http://10.17.17.90:8086/mcp"
+    config["news_mcp_url"] = "http://10.17.17.90:9081/mcp"
     config["mcp_verify_tls"] = False
 
-    config["data_vendors"]["core_stock_apis"] = "fmp"
+    config["data_vendors"]["core_stock_apis"] = "massive"
     config["data_vendors"]["fundamental_data"] = "fmp"
     config["data_vendors"]["news_data"] = "fmp"
-    config["tool_vendors"]["get_stock_data"] = "fmp"
+    config["tool_vendors"]["get_stock_data"] = "massive"
     config["tool_vendors"]["get_fundamentals"] = "fmp"
     config["tool_vendors"]["get_balance_sheet"] = "fmp"
     config["tool_vendors"]["get_cashflow"] = "fmp"

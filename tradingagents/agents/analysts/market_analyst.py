@@ -2,8 +2,15 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_indicators,
+    get_intraday_bars,
     get_language_instruction,
+    get_last_trade,
+    get_market_regime,
+    get_nbbo_quotes,
+    get_options_chain,
+    get_session_bars,
     get_stock_data,
+    get_ticker_snapshot,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -19,6 +26,13 @@ def create_market_analyst(llm):
 
         tools = [
             get_stock_data,
+            get_intraday_bars,
+            get_session_bars,
+            get_ticker_snapshot,
+            get_market_regime,
+            get_last_trade,
+            get_nbbo_quotes,
+            get_options_chain,
             get_indicators,
         ]
 
@@ -47,7 +61,7 @@ Volatility Indicators:
 Volume-Based Indicators:
 - vwma: VWMA: A moving average weighted by volume. Usage: Confirm trends by integrating price action with volume data. Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses.
 
-- Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail. Please make sure to call get_stock_data first to retrieve the CSV that is needed to generate indicators. Then use get_indicators with the specific indicator names. Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
+- Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail. Always ground the report in market structure first: call get_market_regime for tape context, get_ticker_snapshot for the instrument snapshot, get_intraday_bars and get_session_bars for premarket/regular/postmarket structure, and get_options_chain for near-spot options positioning when useful. Use get_last_trade and get_nbbo_quotes only for short-horizon execution/timing context, not as a replacement for broader structure. Call get_stock_data before get_indicators whenever you need indicator analysis. Write a very detailed and nuanced report of the trends you observe. The report must explicitly cover market regime, intraday structure, session behavior, options context (without inventing greeks/open interest if they are not present), and execution/tape context when the data supports it. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )

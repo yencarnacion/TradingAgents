@@ -29,6 +29,13 @@ from tradingagents.dataflows.config import set_config
 # Import the new abstract tool methods from agent_utils
 from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
+    get_intraday_bars,
+    get_session_bars,
+    get_ticker_snapshot,
+    get_market_regime,
+    get_last_trade,
+    get_nbbo_quotes,
+    get_options_chain,
     get_indicators,
     get_fundamentals,
     get_balance_sheet,
@@ -160,8 +167,15 @@ class TradingAgentsGraph:
         return {
             "market": ToolNode(
                 [
-                    # Core stock data tools
+                    # Core market structure tools
                     get_stock_data,
+                    get_intraday_bars,
+                    get_session_bars,
+                    get_ticker_snapshot,
+                    get_market_regime,
+                    get_last_trade,
+                    get_nbbo_quotes,
+                    get_options_chain,
                     # Technical indicators
                     get_indicators,
                 ]

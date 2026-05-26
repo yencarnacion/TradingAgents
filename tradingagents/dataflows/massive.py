@@ -4,8 +4,9 @@ import csv
 import io
 import json
 import os
-from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, Iterable, List, Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -13,6 +14,14 @@ from .config import get_config
 from .mcp_support import MCPToolError, call_tool, market_data_mcp_url
 
 _MASSIVE_BASE_URL = os.getenv("MASSIVE_BASE_URL", "https://api.massive.com")
+_ET = ZoneInfo("America/New_York")
+_SESSION_WINDOWS = {
+    "premarket": ((4, 0), (9, 29)),
+    "regular": ((9, 30), (16, 0)),
+    "postmarket": ((16, 1), (19, 59)),
+    "afterhours": ((16, 1), (19, 59)),
+}
+_DEFAULT_SECTOR_ETFS = ("XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU")
 
 
 def _massive_api_key() -> Optional[str]:
@@ -70,6 +79,135 @@ def _rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(results, dict):
         return [results]
     return list(results)
+
+
+def _snapshot_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    results = payload.get("results") or []
+    if isinstance(results, dict):
+        if "ticker" in results:
+            return [results]
+        tickers = results.get("tickers")
+        if isinstance(tickers, list):
+            return [row for row in tickers if isinstance(row, dict)]
+    if isinstance(results, list):
+        return [row for row in results if isinstance(row, dict)]
+    return []
+
+
+def _timestamp_ms_to_et(timestamp_ms: Any) -> Optional[datetime]:
+    if timestamp_ms in (None, ""):
+        return None
+    return datetime.fromtimestamp(int(float(timestamp_ms)) / 1000, tz=ZoneInfo("UTC")).astimezone(_ET)
+
+
+def _session_label(session: str) -> str:
+    normalized = session.strip().lower()
+    return "postmarket" if normalized == "afterhours" else normalized
+
+
+def _time_in_window(ts: datetime, start: tuple[int, int], end: tuple[int, int]) -> bool:
+    current = (ts.hour, ts.minute)
+    return start <= current <= end
+
+
+def _session_window_text(session: str) -> str:
+    start, end = _SESSION_WINDOWS[_session_label(session)]
+    return f"{start[0]:02d}:{start[1]:02d}-{end[0]:02d}:{end[1]:02d}"
+
+
+def _candidate_trade_dates(trade_date: str, max_lookback_days: int = 7) -> List[str]:
+    requested = datetime.strptime(trade_date, "%Y-%m-%d")
+    return [
+        (requested - timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in range(max_lookback_days + 1)
+    ]
+
+
+def _find_latest_available_rows(
+    requested_trade_date: str,
+    fetch_rows: Callable[[str], List[Dict[str, Any]]],
+    max_lookback_days: int = 7,
+) -> tuple[str, List[Dict[str, Any]]]:
+    for candidate_trade_date in _candidate_trade_dates(requested_trade_date, max_lookback_days=max_lookback_days):
+        rows = fetch_rows(candidate_trade_date)
+        if rows:
+            return candidate_trade_date, rows
+    return requested_trade_date, []
+
+
+def _effective_trade_date_note(requested_trade_date: str, effective_trade_date: str) -> str:
+    if effective_trade_date == requested_trade_date:
+        return f"# Requested trade date: {requested_trade_date}\n\n"
+    return (
+        f"# Requested trade date: {requested_trade_date}\n"
+        f"# Using latest completed session: {effective_trade_date}\n\n"
+    )
+
+
+def _normalize_aggregate_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized = []
+    for row in rows:
+        timestamp_ms = row.get("t")
+        timestamp_et = _timestamp_ms_to_et(timestamp_ms)
+        normalized.append(
+            {
+                "timestamp_et": timestamp_et.strftime("%Y-%m-%d %H:%M:%S ET") if timestamp_et else None,
+                "open": row.get("o"),
+                "high": row.get("h"),
+                "low": row.get("l"),
+                "close": row.get("c"),
+                "volume": row.get("v"),
+                "vwap": row.get("vw"),
+                "transactions": row.get("n"),
+                "timestamp_ms": int(float(timestamp_ms)) if timestamp_ms not in (None, "") else None,
+            }
+        )
+    return normalized
+
+
+def _ticker_snapshot_rows(symbols: List[str]) -> List[Dict[str, Any]]:
+    if len(symbols) == 1:
+        payload = _request(f"/v2/snapshot/locale/us/markets/stocks/tickers/{symbols[0]}")
+    else:
+        payload = _request(
+            "/v2/snapshot/locale/us/markets/stocks/tickers",
+            params={"tickers": ",".join(symbols)},
+        )
+    return _snapshot_rows(payload)
+
+
+def _flatten_snapshot_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    session = row.get("session") or {}
+    last_trade = row.get("lastTrade") or row.get("last_trade") or {}
+    prev_day = row.get("prevDay") or row.get("prev_day") or {}
+    return {
+        "ticker": row.get("ticker"),
+        "session_open": session.get("open"),
+        "session_high": session.get("high"),
+        "session_low": session.get("low"),
+        "session_close": session.get("close"),
+        "session_change": session.get("change"),
+        "session_change_percent": session.get("change_percent"),
+        "session_volume": session.get("volume"),
+        "last_trade_price": last_trade.get("p") or last_trade.get("price"),
+        "last_trade_size": last_trade.get("s") or last_trade.get("size"),
+        "last_trade_timestamp": last_trade.get("t") or last_trade.get("timestamp"),
+        "prev_close": prev_day.get("close"),
+        "prev_volume": prev_day.get("volume"),
+    }
+
+
+def _spot_price_from_snapshot(symbol: str) -> Optional[float]:
+    rows = _ticker_snapshot_rows([symbol.upper()])
+    if not rows:
+        return None
+    row = rows[0]
+    session = row.get("session") or {}
+    last_trade = row.get("lastTrade") or row.get("last_trade") or {}
+    for value in (session.get("close"), last_trade.get("p"), last_trade.get("price"), session.get("open")):
+        if value not in (None, ""):
+            return float(value)
+    return None
 
 
 def _to_csv_block(rows: List[Dict[str, Any]]) -> str:
@@ -152,6 +290,252 @@ def get_stock_data(symbol: str, start_date: str, end_date: str):
         return _header(f"Stock data for {symbol.upper()} from {start_date} to {end_date}") + _to_csv_block(normalized)
     except Exception as e:
         return f"Error retrieving Massive stock data for {symbol}: {e}"
+
+
+def get_intraday_bars(symbol: str, trade_date: str, multiplier: int = 5, timespan: str = "minute", limit: int = 5000):
+    try:
+        def fetch_rows(candidate_trade_date: str) -> List[Dict[str, Any]]:
+            payload = _request(
+                f"/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{candidate_trade_date}/{candidate_trade_date}",
+                params={"adjusted": "true", "sort": "asc", "limit": limit},
+            )
+            return _rows(payload)
+
+        effective_trade_date, rows = _find_latest_available_rows(trade_date, fetch_rows)
+        if not rows:
+            return f"No intraday {timespan} bars found for symbol '{symbol}' on {trade_date}"
+        normalized = _normalize_aggregate_rows(rows)
+        return (
+            _header(f"Intraday {multiplier}-{timespan} bars for {symbol.upper()} on {effective_trade_date}")
+            + _effective_trade_date_note(trade_date, effective_trade_date)
+            + _to_csv_block(normalized)
+        )
+    except Exception as e:
+        return f"Error retrieving Massive intraday bars for {symbol}: {e}"
+
+
+def get_session_bars(symbol: str, trade_date: str, session: str = "premarket", multiplier: int = 5, timespan: str = "minute", limit: int = 5000):
+    try:
+        normalized_session = _session_label(session)
+        if normalized_session not in _SESSION_WINDOWS:
+            raise ValueError(f"Unsupported session '{session}'. Choose from: {', '.join(sorted(_SESSION_WINDOWS))}")
+        start, end = _SESSION_WINDOWS[normalized_session]
+
+        def fetch_rows(candidate_trade_date: str) -> List[Dict[str, Any]]:
+            payload = _request(
+                f"/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/{timespan}/{candidate_trade_date}/{candidate_trade_date}",
+                params={"adjusted": "true", "sort": "asc", "limit": limit},
+            )
+            filtered_rows = []
+            for row in _rows(payload):
+                timestamp_et = _timestamp_ms_to_et(row.get("t"))
+                if timestamp_et is None or timestamp_et.strftime("%Y-%m-%d") != candidate_trade_date:
+                    continue
+                if _time_in_window(timestamp_et, start, end):
+                    filtered_rows.append(row)
+            return filtered_rows
+
+        effective_trade_date, filtered_rows = _find_latest_available_rows(trade_date, fetch_rows)
+        if not filtered_rows:
+            return f"No {normalized_session} {timespan} bars found for symbol '{symbol}' on {trade_date}"
+        normalized = _normalize_aggregate_rows(filtered_rows)
+        return (
+            _header(f"{normalized_session.title()} {multiplier}-{timespan} bars for {symbol.upper()} on {effective_trade_date}")
+            + _effective_trade_date_note(trade_date, effective_trade_date)
+            + f"# Session window (America/New_York): {_session_window_text(normalized_session)}\n\n"
+            + _to_csv_block(normalized)
+        )
+    except Exception as e:
+        return f"Error retrieving Massive session bars for {symbol}: {e}"
+
+
+def get_ticker_snapshot(symbol: str):
+    try:
+        rows = _ticker_snapshot_rows([symbol.upper()])
+        if not rows:
+            return f"No snapshot found for symbol '{symbol}'"
+        return _header(f"Ticker snapshot for {symbol.upper()}") + _to_csv_block([_flatten_snapshot_row(rows[0])])
+    except Exception as e:
+        return f"Error retrieving Massive ticker snapshot for {symbol}: {e}"
+
+
+def get_last_trade(symbol: str):
+    try:
+        payload = _request(f"/v2/last/trade/{symbol.upper()}")
+        rows = _rows(payload)
+        if not rows:
+            return f"No last-trade data found for symbol '{symbol}'"
+        row = rows[0]
+        normalized = {
+            "ticker": symbol.upper(),
+            "price": row.get("p") or row.get("price"),
+            "size": row.get("s") or row.get("size"),
+            "exchange": row.get("x") or row.get("exchange"),
+            "timestamp_ms": row.get("t") or row.get("timestamp"),
+        }
+        return _header(f"Last trade for {symbol.upper()}") + _to_csv_block([normalized])
+    except Exception as e:
+        return f"Error retrieving Massive last trade for {symbol}: {e}"
+
+
+def get_nbbo_quotes(symbol: str, limit: int = 20):
+    try:
+        payload = _request(
+            f"/v3/quotes/{symbol.upper()}",
+            params={"limit": limit, "sort": "timestamp", "order": "desc"},
+        )
+        rows = []
+        for row in _rows(payload)[:limit]:
+            rows.append(
+                {
+                    "ticker": row.get("ticker") or symbol.upper(),
+                    "bid_price": row.get("bp"),
+                    "bid_size": row.get("bs"),
+                    "ask_price": row.get("ap"),
+                    "ask_size": row.get("as"),
+                    "spread": (
+                        round(float(row.get("ap")) - float(row.get("bp")), 6)
+                        if row.get("ap") not in (None, "") and row.get("bp") not in (None, "")
+                        else None
+                    ),
+                    "sip_timestamp": row.get("sip_timestamp") or row.get("t"),
+                }
+            )
+        if not rows:
+            return f"No NBBO quote data found for symbol '{symbol}'"
+        return _header(f"NBBO quotes for {symbol.upper()}") + _to_csv_block(rows)
+    except Exception as e:
+        return f"Error retrieving Massive NBBO quotes for {symbol}: {e}"
+
+
+def get_market_regime(curr_date: str, benchmark_symbols: tuple[str, ...] = ("SPY", "QQQ", "IWM")):
+    try:
+        effective_trade_date, grouped = _find_latest_available_rows(
+            curr_date,
+            lambda candidate_trade_date: _rows(_request(f"/v2/aggs/grouped/locale/us/market/stocks/{candidate_trade_date}")),
+        )
+        advancers = decliners = unchanged = up_volume = down_volume = 0
+        for row in grouped:
+            open_price = row.get("o")
+            close_price = row.get("c")
+            volume = row.get("v") or 0
+            if open_price in (None, "") or close_price in (None, ""):
+                continue
+            open_price = float(open_price)
+            close_price = float(close_price)
+            volume = int(float(volume)) if volume not in (None, "") else 0
+            if close_price > open_price:
+                advancers += 1
+                up_volume += volume
+            elif close_price < open_price:
+                decliners += 1
+                down_volume += volume
+            else:
+                unchanged += 1
+        breadth_rows = [{
+            "advancers": advancers,
+            "decliners": decliners,
+            "unchanged": unchanged,
+            "advance_decline_ratio": round(advancers / decliners, 4) if decliners else None,
+            "up_volume": up_volume,
+            "down_volume": down_volume,
+        }]
+        regime_symbols = [symbol.upper() for symbol in benchmark_symbols] + [symbol for symbol in _DEFAULT_SECTOR_ETFS if symbol not in benchmark_symbols]
+        snapshots = [_flatten_snapshot_row(row) for row in _ticker_snapshot_rows(regime_symbols)]
+        sections = [
+            _header(f"Market regime for {effective_trade_date}").rstrip(),
+            "",
+            _effective_trade_date_note(curr_date, effective_trade_date).strip(),
+            "## Market breadth",
+            _to_csv_block(breadth_rows).strip(),
+            "",
+            "## Benchmark and sector snapshots",
+            _to_csv_block(snapshots).strip(),
+        ]
+        try:
+            from . import fmp
+            vix_rows = fmp._rows(fmp._call("indexes", {"endpoint": "index-quote-short", "symbol": "^VIX"}))
+            if vix_rows:
+                sections.extend(["", "## VIX fallback", fmp._to_csv_block(vix_rows).strip()])
+        except Exception:
+            pass
+        return "\n".join(sections).strip() + "\n"
+    except Exception as e:
+        return f"Error retrieving Massive market regime for {curr_date}: {e}"
+
+
+def get_options_chain(symbol: str, trade_date: str, expiration_date: Optional[str] = None, contract_type: Optional[str] = None, strike_window: int = 5, limit: int = 25):
+    try:
+        spot_price = _spot_price_from_snapshot(symbol)
+
+        def fetch_contract_rows(candidate_trade_date: str) -> List[Dict[str, Any]]:
+            params: Dict[str, Any] = {
+                "underlying_ticker": symbol.upper(),
+                "limit": max(limit * 3, 25),
+                "sort": "expiration_date",
+                "order": "asc",
+                "as_of": candidate_trade_date,
+            }
+            if expiration_date:
+                params["expiration_date"] = expiration_date
+            if contract_type:
+                params["contract_type"] = contract_type.lower()
+            return _rows(_request("/v3/reference/options/contracts", params=params))
+
+        effective_trade_date, contracts = _find_latest_available_rows(trade_date, fetch_contract_rows)
+        if not contracts:
+            return f"No options contracts found for symbol '{symbol}' on {trade_date}"
+        if spot_price is not None:
+            within_window = [
+                row for row in contracts
+                if row.get("strike_price") not in (None, "") and abs(float(row.get("strike_price")) - spot_price) <= strike_window
+            ]
+            ranked = sorted(within_window or contracts, key=lambda row: (
+                abs(float(row.get("strike_price") or 0) - spot_price),
+                str(row.get("expiration_date") or ""),
+                float(row.get("strike_price") or 0),
+            ))
+        else:
+            ranked = contracts
+        selected = ranked[:limit]
+        normalized_rows = []
+        for row in selected:
+            contract_symbol = row.get("ticker")
+            prev_payload = _rows(_request(f"/v2/aggs/ticker/{contract_symbol}/prev"))
+            prev_row = prev_payload[0] if prev_payload else {}
+            day_effective_trade_date, day_payload = _find_latest_available_rows(
+                trade_date,
+                lambda candidate_trade_date: _rows(
+                    _request(f"/v2/aggs/ticker/{contract_symbol}/range/1/day/{candidate_trade_date}/{candidate_trade_date}")
+                ),
+            )
+            day_row = day_payload[0] if day_payload else {}
+            normalized_rows.append(
+                {
+                    "ticker": contract_symbol,
+                    "underlying_ticker": symbol.upper(),
+                    "spot_price": _clean_value(spot_price),
+                    "expiration_date": row.get("expiration_date"),
+                    "contract_type": row.get("contract_type"),
+                    "strike_price": row.get("strike_price"),
+                    "shares_per_contract": row.get("shares_per_contract"),
+                    "prev_close": prev_row.get("c"),
+                    "prev_volume": prev_row.get("v"),
+                    "trade_date_effective": day_effective_trade_date,
+                    "trade_date_open": day_row.get("o"),
+                    "trade_date_high": day_row.get("h"),
+                    "trade_date_low": day_row.get("l"),
+                    "trade_date_close": day_row.get("c"),
+                    "trade_date_volume": day_row.get("v"),
+                }
+            )
+        return (
+            _header(f"Options chain for {symbol.upper()} on {effective_trade_date}")
+            + _effective_trade_date_note(trade_date, effective_trade_date)
+            + _to_csv_block(normalized_rows)
+        )
+    except Exception as e:
+        return f"Error retrieving Massive options chain for {symbol}: {e}"
 
 
 def get_fundamentals(ticker: str, curr_date: Optional[str] = None):

@@ -66,8 +66,12 @@ class SentimentXSourceTests(unittest.TestCase):
     def setUp(self):
         set_config(copy.deepcopy(default_config.DEFAULT_CONFIG))
 
-    def test_optional_x_sentiment_disabled_by_default(self):
-        self.assertEqual(sentiment_analyst._fetch_optional_x_sentiment("AAPL", "2026-01-01", "2026-01-10"), "")
+    def test_optional_x_sentiment_uses_grok_by_default(self):
+        with patch.object(sentiment_analyst, "get_x_sentiment_report", return_value="x-block") as mocked:
+            result = sentiment_analyst._fetch_optional_x_sentiment("AAPL", "2026-01-01", "2026-01-10")
+
+        mocked.assert_called_once_with("AAPL", "2026-01-01", "2026-01-10")
+        self.assertEqual(result, "x-block")
 
     def test_optional_x_sentiment_uses_grok_when_enabled(self):
         set_config({"sentiment_x_source": "grok"})

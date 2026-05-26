@@ -114,9 +114,9 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
-    # Optional X/Twitter sentiment enrichment for the sentiment analyst.
-    # Set to "grok" to prefetch an X-search-backed sentiment block via xAI.
-    "sentiment_x_source": "disabled",
+    # X/Twitter sentiment source for the sentiment analyst.
+    # Default to "grok" so social sentiment comes from X rather than Reddit.
+    "sentiment_x_source": "grok",
     # Benchmark for alpha calculation in the reflection layer.
     # ``benchmark_ticker`` (when set) overrides the suffix map for all
     # tickers; leave it None to use ``benchmark_map`` for auto-detection
