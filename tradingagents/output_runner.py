@@ -13,12 +13,14 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
+from zoneinfo import ZoneInfo
 
 
 DEFAULT_TICKER = "SPY"
 DEFAULT_PUBLIC_HOST = os.getenv("TICKER_AGENTS_PUBLIC_HOST", "10.17.17.98")
 DEFAULT_PORT = int(os.getenv("TICKER_AGENTS_OUTPUT_PORT", "8765"))
+NEW_YORK_TZ = ZoneInfo("America/New_York")
 FINAL_BEGIN = "=== FINAL_DECISION_MARKDOWN_BEGIN ==="
 FINAL_END = "=== FINAL_DECISION_MARKDOWN_END ==="
 STACK_EXAMPLES = {
@@ -36,6 +38,13 @@ class RunPaths:
     index_html: Path
     final_md: Path
     final_html: Path
+
+
+@dataclass(frozen=True)
+class ReportArtifactSpec:
+    slug: str
+    title: str
+    extractor: Callable[[dict[str, Any]], Optional[str]]
 
 
 def slugify(value: str) -> str:
@@ -97,8 +106,119 @@ def extract_final_decision(log_text: str) -> Optional[str]:
     return body or None
 
 
+def _extract_nested_text(state: dict[str, Any], *keys: str) -> Optional[str]:
+    current: Any = state
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    if not isinstance(current, str):
+        return None
+    text = current.strip()
+    return text or None
+
+
+REPORT_ARTIFACT_SPECS: tuple[ReportArtifactSpec, ...] = (
+    ReportArtifactSpec("market-report", "Market Report", lambda state: _extract_nested_text(state, "market_report")),
+    ReportArtifactSpec("sentiment-report", "Sentiment Report", lambda state: _extract_nested_text(state, "sentiment_report")),
+    ReportArtifactSpec("news-report", "News Report", lambda state: _extract_nested_text(state, "news_report")),
+    ReportArtifactSpec("fundamentals-report", "Fundamentals Report", lambda state: _extract_nested_text(state, "fundamentals_report")),
+    ReportArtifactSpec("bullish-report", "Bullish Report", lambda state: _extract_nested_text(state, "investment_debate_state", "bull_history")),
+    ReportArtifactSpec("bearish-report", "Bearish Report", lambda state: _extract_nested_text(state, "investment_debate_state", "bear_history")),
+    ReportArtifactSpec("research-manager-report", "Research Manager Report", lambda state: _extract_nested_text(state, "investment_debate_state", "judge_decision")),
+    ReportArtifactSpec("investment-plan", "Investment Plan", lambda state: _extract_nested_text(state, "investment_plan")),
+    ReportArtifactSpec("trader-report", "Trader Report", lambda state: _extract_nested_text(state, "trader_investment_decision")),
+    ReportArtifactSpec("aggressive-risk-report", "Aggressive Risk Report", lambda state: _extract_nested_text(state, "risk_debate_state", "aggressive_history")),
+    ReportArtifactSpec("conservative-risk-report", "Conservative Risk Report", lambda state: _extract_nested_text(state, "risk_debate_state", "conservative_history")),
+    ReportArtifactSpec("neutral-risk-report", "Neutral Risk Report", lambda state: _extract_nested_text(state, "risk_debate_state", "neutral_history")),
+    ReportArtifactSpec("portfolio-manager-report", "Portfolio Manager Report", lambda state: _extract_nested_text(state, "risk_debate_state", "judge_decision")),
+)
+
+
+def state_log_path(ticker: str, analysis_date: str) -> Path:
+    return (
+        Path.home()
+        / ".tradingagents"
+        / "logs"
+        / ticker
+        / "TradingAgentsStrategy_logs"
+        / f"full_states_log_{analysis_date}.json"
+    )
+
+
+def load_state_log(path: Path) -> Optional[dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def append_artifact_warning(metadata: dict[str, Any], message: str) -> None:
+    existing = metadata.get("artifact_warning")
+    metadata["artifact_warning"] = f"{existing}; {message}" if existing else message
+
+
+def format_timestamp_for_display(raw: Optional[str]) -> str:
+    if not raw:
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed.astimezone(NEW_YORK_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def write_report_artifacts(run_dir: Path, ticker: str, analysis_date: str, state: dict[str, Any]) -> list[dict[str, str]]:
+    artifacts: list[dict[str, str]] = []
+    for spec in REPORT_ARTIFACT_SPECS:
+        body = spec.extractor(state)
+        if not body:
+            continue
+        md_path = run_dir / f"{spec.slug}.md"
+        html_path = run_dir / f"{spec.slug}.html"
+        md_path.write_text(body + "\n", encoding="utf-8")
+        html_path.write_text(
+            render_markdown_html(f"{spec.title}: {ticker} @ {analysis_date}", body),
+            encoding="utf-8",
+        )
+        artifacts.append(
+            {
+                "slug": spec.slug,
+                "title": spec.title,
+                "markdown_path": md_path.name,
+                "html_path": html_path.name,
+            }
+        )
+    return artifacts
+
+
 def write_metadata(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def publish_runtime_artifacts(
+    *,
+    run_dir: Path,
+    metadata: dict[str, Any],
+    metadata_path: Path,
+    index_path: Path,
+    ticker: str,
+    analysis_date: str,
+    state_log: Path,
+) -> None:
+    state = load_state_log(state_log)
+    if not state:
+        return
+    state_log_copy = run_dir / state_log.name
+    state_log_copy.write_text(state_log.read_text(encoding="utf-8"), encoding="utf-8")
+    metadata["state_log"] = state_log_copy.name
+    metadata["report_artifacts"] = write_report_artifacts(run_dir, ticker, analysis_date, state)
+    write_metadata(metadata_path, metadata)
+    index_path.write_text(render_index_html(metadata), encoding="utf-8")
 
 
 def render_live_html(title: str) -> str:
@@ -341,18 +461,34 @@ def render_index_html(metadata: dict) -> str:
         ("Raw console text", "console.txt"),
         ("Run metadata", "metadata.json"),
     ]
+    if metadata.get("state_log"):
+        links.append(("Full state log", metadata["state_log"]))
     if metadata.get("has_final_markdown"):
         links.append(("Rendered final decision", "final.html"))
         links.append(("Final decision markdown", "final.md"))
+    for artifact in metadata.get("report_artifacts", []):
+        links.append((f"{artifact['title']} (HTML)", artifact["html_path"]))
+        links.append((f"{artifact['title']} (Markdown)", artifact["markdown_path"]))
     link_html = "".join(f'<li><a href="{href}">{label}</a></li>' for label, href in links)
+    report_summary = ""
+    if metadata.get("report_artifacts"):
+        report_items = "".join(
+            (
+                f'<li><strong>{html.escape(artifact["title"])}</strong>: '
+                f'<a href="{artifact["html_path"]}">HTML</a> · '
+                f'<a href="{artifact["markdown_path"]}">Markdown</a></li>'
+            )
+            for artifact in metadata["report_artifacts"]
+        )
+        report_summary = f"<h2>Published reports</h2><ul>{report_items}</ul>"
     details = "".join(
         f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>"
         for k, v in [
             ("ticker", metadata.get("ticker")),
             ("analysis_date", metadata.get("analysis_date")),
             ("status", metadata.get("status")),
-            ("started_at", metadata.get("started_at")),
-            ("finished_at", metadata.get("finished_at") or "—"),
+            ("started_at", format_timestamp_for_display(metadata.get("started_at"))),
+            ("finished_at", format_timestamp_for_display(metadata.get("finished_at"))),
             ("duration", metadata.get("duration_hms") or "—"),
             ("exit_code", metadata.get("exit_code")),
             ("command", metadata.get("command")),
@@ -379,6 +515,7 @@ def render_index_html(metadata: dict) -> str:
   <div class=\"box\">
     <p>This run stores both CLI-friendly text and browser-friendly HTML output.</p>
     <ul>{link_html}</ul>
+    {report_summary}
     <table>{details}</table>
   </div>
 </body>
@@ -443,7 +580,14 @@ def ensure_http_server(output_root: Path, port: int) -> None:
     time.sleep(0.5)
 
 
-def stream_command(command: list[str], cwd: Path, env: dict[str, str], out_handle, capture: list[str]) -> int:
+def stream_command(
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    out_handle,
+    capture: list[str],
+    on_output: Optional[Callable[[], None]] = None,
+) -> int:
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -460,7 +604,12 @@ def stream_command(command: list[str], cwd: Path, env: dict[str, str], out_handl
         out_handle.write(line)
         out_handle.flush()
         capture.append(line)
-    return process.wait()
+        if on_output:
+            on_output()
+    exit_code = process.wait()
+    if on_output:
+        on_output()
+    return exit_code
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -519,6 +668,8 @@ def run(argv: Optional[list[str]] = None) -> int:
         "index_url": index_url,
         "raw_url": raw_url,
         "has_final_markdown": False,
+        "report_artifacts": [],
+        "state_log": None,
         "artifact_warning": None,
     }
     write_metadata(paths.metadata_json, metadata)
@@ -536,6 +687,32 @@ def run(argv: Optional[list[str]] = None) -> int:
     combined_output: list[str] = []
     env = os.environ.copy()
     env.setdefault("OPENAI_API_KEY", "dummy")
+    state_log = state_log_path(ticker, analysis_date)
+    last_runtime_publish_at = 0.0
+    runtime_publish_warning: Optional[str] = None
+
+    def maybe_publish_runtime_artifacts(force: bool = False) -> None:
+        nonlocal last_runtime_publish_at, runtime_publish_warning
+        now = time.monotonic()
+        if not force and now - last_runtime_publish_at < 2:
+            return
+        try:
+            publish_runtime_artifacts(
+                run_dir=paths.run_dir,
+                metadata=metadata,
+                metadata_path=paths.metadata_json,
+                index_path=paths.index_html,
+                ticker=ticker,
+                analysis_date=analysis_date,
+                state_log=state_log,
+            )
+        except Exception as exc:
+            warning = f"runtime report publish failed: {exc}"
+            if runtime_publish_warning != warning:
+                append_artifact_warning(metadata, warning)
+                runtime_publish_warning = warning
+        last_runtime_publish_at = now
+
     try:
         with paths.console_txt.open("w", encoding="utf-8") as out_handle:
             header = (
@@ -559,7 +736,14 @@ def run(argv: Optional[list[str]] = None) -> int:
                 app_command = build_app_command(repo_root, ticker, analysis_date, args.stack)
                 metadata["command"] = " ".join(app_command)
                 write_metadata(paths.metadata_json, metadata)
-                app_exit = stream_command(app_command, repo_root, env, out_handle, combined_output)
+                app_exit = stream_command(
+                    app_command,
+                    repo_root,
+                    env,
+                    out_handle,
+                    combined_output,
+                    on_output=maybe_publish_runtime_artifacts,
+                )
                 metadata["status"] = "completed" if app_exit == 0 else "failed"
                 metadata["exit_code"] = app_exit
     except KeyboardInterrupt as exc:
@@ -581,6 +765,7 @@ def run(argv: Optional[list[str]] = None) -> int:
 
     full_text = "".join(combined_output)
     final_md = extract_final_decision(full_text)
+    maybe_publish_runtime_artifacts(force=True)
     try:
         if final_md:
             paths.final_md.write_text(final_md + "\n", encoding="utf-8")
@@ -591,9 +776,11 @@ def run(argv: Optional[list[str]] = None) -> int:
             metadata["has_final_markdown"] = True
         else:
             metadata["has_final_markdown"] = False
+
+        maybe_publish_runtime_artifacts(force=True)
     except Exception as exc:
         metadata["has_final_markdown"] = paths.final_md.exists()
-        metadata["artifact_warning"] = f"final artifact rendering failed: {exc}"
+        append_artifact_warning(metadata, f"final artifact rendering failed: {exc}")
         if metadata["status"] == "completed":
             metadata["status"] = "completed_with_warnings"
     finally:
@@ -603,6 +790,7 @@ def run(argv: Optional[list[str]] = None) -> int:
             out_handle.write(f"finished_at: {metadata['finished_at']}\n")
             out_handle.write(f"duration: {metadata['duration_hms']}\n")
             out_handle.write(f"exit_code: {metadata['exit_code']}\n")
+            out_handle.write(f"report_artifacts: {len(metadata.get('report_artifacts', []))}\n")
             if metadata.get("artifact_warning"):
                 out_handle.write(f"artifact_warning: {metadata['artifact_warning']}\n")
 

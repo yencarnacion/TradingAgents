@@ -13,9 +13,13 @@ from tradingagents.output_runner import (
     extract_final_decision,
     format_duration,
     parse_args,
+    publish_runtime_artifacts,
+    render_index_html,
     render_live_html,
     render_markdown_html,
     resolve_run_request,
+    state_log_path,
+    write_report_artifacts,
 )
 
 
@@ -100,6 +104,144 @@ def test_render_markdown_html_falls_back_when_markdown_missing():
     assert "# Title" in html
 
 
+def test_write_report_artifacts_publishes_bull_bear_and_risk_reports(tmp_path):
+    state = {
+        "sentiment_report": "# Sentiment\n\nBullish crowding.",
+        "investment_debate_state": {
+            "bull_history": "## Bull Case\n\nMomentum + flows.",
+            "bear_history": "## Bear Case\n\nCrowding + macro risk.",
+            "judge_decision": "## Research Manager\n\nScale in.",
+        },
+        "investment_plan": "## Investment Plan\n\nAdd on pullbacks.",
+        "trader_investment_decision": "## Trader\n\nBuy in tranches.",
+        "risk_debate_state": {
+            "aggressive_history": "## Aggressive\n\nLean in.",
+            "conservative_history": "## Conservative\n\nProtect capital.",
+            "neutral_history": "## Neutral\n\nStagger entries.",
+            "judge_decision": "## Portfolio Manager\n\nOverweight with guardrails.",
+        },
+    }
+
+    artifacts = write_report_artifacts(tmp_path, "QQQ", "2026-05-25", state)
+    slugs = {artifact["slug"] for artifact in artifacts}
+
+    assert "sentiment-report" in slugs
+    assert "bullish-report" in slugs
+    assert "bearish-report" in slugs
+    assert "research-manager-report" in slugs
+    assert "trader-report" in slugs
+    assert "portfolio-manager-report" in slugs
+    assert (tmp_path / "bullish-report.md").exists()
+    assert (tmp_path / "bullish-report.html").exists()
+    assert "Bull Case" in (tmp_path / "bullish-report.md").read_text()
+
+
+def test_render_index_html_lists_report_artifacts():
+    html = render_index_html(
+        {
+            "title": "Ticker Agents Run: QQQ @ 2026-05-25",
+            "ticker": "QQQ",
+            "analysis_date": "2026-05-25",
+            "status": "completed",
+            "started_at": "2026-05-25T08:00:00",
+            "finished_at": "2026-05-25T08:10:00",
+            "duration_hms": "00:10:00",
+            "exit_code": 0,
+            "command": "python run_fmp_mcp_stack.py QQQ 2026-05-25",
+            "has_final_markdown": True,
+            "state_log": "full_states_log_2026-05-25.json",
+            "report_artifacts": [
+                {
+                    "title": "Bullish Report",
+                    "markdown_path": "bullish-report.md",
+                    "html_path": "bullish-report.html",
+                }
+            ],
+        }
+    )
+
+    assert "Published reports" in html
+    assert "Bullish Report" in html
+    assert "bullish-report.html" in html
+    assert "full_states_log_2026-05-25.json" in html
+
+
+def test_state_log_path_uses_tradingagents_home_convention():
+    path = state_log_path("QQQ", "2026-05-25")
+    assert str(path).endswith("/.tradingagents/logs/QQQ/TradingAgentsStrategy_logs/full_states_log_2026-05-25.json")
+
+
+def test_render_index_html_formats_started_at_in_new_york_time():
+    html = render_index_html(
+        {
+            "title": "Ticker Agents Run: QQQ @ 2026-05-25",
+            "ticker": "QQQ",
+            "analysis_date": "2026-05-25",
+            "status": "running",
+            "started_at": "2026-05-25T08:00:00+00:00",
+            "finished_at": None,
+            "duration_hms": "00:00:00",
+            "exit_code": None,
+            "command": "python run_fmp_mcp_stack.py QQQ 2026-05-25",
+            "has_final_markdown": False,
+            "state_log": None,
+            "report_artifacts": [],
+        }
+    )
+
+    assert "2026-05-25 04:00:00 EDT" in html
+    assert "2026-05-25T08:00:00+00:00" not in html
+
+
+def test_publish_runtime_artifacts_updates_metadata_and_index_mid_run(tmp_path):
+    run_dir = tmp_path / "qqq-run"
+    run_dir.mkdir()
+    metadata_path = run_dir / "metadata.json"
+    index_path = run_dir / "index.html"
+    state_log = tmp_path / "full_states_log_2026-05-25.json"
+    metadata = {
+        "title": "Ticker Agents Run: QQQ @ 2026-05-25",
+        "ticker": "QQQ",
+        "analysis_date": "2026-05-25",
+        "status": "running",
+        "started_at": "2026-05-25T08:00:00+00:00",
+        "finished_at": None,
+        "duration_hms": "00:00:00",
+        "exit_code": None,
+        "command": "python run_fmp_mcp_stack.py QQQ 2026-05-25",
+        "has_final_markdown": False,
+        "state_log": None,
+        "report_artifacts": [],
+        "artifact_warning": None,
+    }
+
+    state_log.write_text(
+        json.dumps(
+            {
+                "sentiment_report": "# Sentiment\n\nMixed.",
+                "investment_debate_state": {"bull_history": "## Bull\n\nUptrend."},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    publish_runtime_artifacts(
+        run_dir=run_dir,
+        metadata=metadata,
+        metadata_path=metadata_path,
+        index_path=index_path,
+        ticker="QQQ",
+        analysis_date="2026-05-25",
+        state_log=state_log,
+    )
+
+    persisted = json.loads(metadata_path.read_text())
+    assert persisted["state_log"] == "full_states_log_2026-05-25.json"
+    assert any(artifact["slug"] == "bullish-report" for artifact in persisted["report_artifacts"])
+    assert (run_dir / "bullish-report.html").exists()
+    assert "Published reports" in index_path.read_text()
+
+
 def test_run_finalizes_metadata_even_if_final_rendering_fails(tmp_path, monkeypatch):
     from tradingagents import output_runner
 
@@ -123,12 +265,15 @@ def test_run_finalizes_metadata_even_if_final_rendering_fails(tmp_path, monkeypa
     monkeypatch.setattr(output_runner, "build_run_slug", lambda *args, **kwargs: "qqq-test-run")
     monkeypatch.setattr(output_runner, "build_paths", lambda run_path: paths)
     monkeypatch.setattr(output_runner, "ensure_http_server", lambda *args, **kwargs: None)
+    monkeypatch.setattr(output_runner, "state_log_path", lambda ticker, analysis_date: tmp_path / "missing-state-log.json")
 
-    def fake_stream(command, cwd, env, out_handle, capture):
+    def fake_stream(command, cwd, env, out_handle, capture, on_output=None):
         if "run_fmp_mcp_stack.py" in " ".join(command):
             payload = f"{FINAL_BEGIN}\nOverweight\n{FINAL_END}\n"
             out_handle.write(payload)
             capture.append(payload)
+            if on_output:
+                on_output()
         return 0
 
     monkeypatch.setattr(output_runner, "stream_command", fake_stream)
@@ -150,3 +295,82 @@ def test_run_finalizes_metadata_even_if_final_rendering_fails(tmp_path, monkeypa
     assert "# Run summary" in summary
     assert "status: completed_with_warnings" in summary
     assert "artifact_warning: final artifact rendering failed: boom" in summary
+    assert "report_artifacts: 0" in summary
+
+
+def test_run_publishes_state_log_reports(tmp_path, monkeypatch):
+    from tradingagents import output_runner
+
+    run_dir = tmp_path / "qqq-run"
+    paths = RunPaths(
+        run_dir=run_dir,
+        console_txt=run_dir / "console.txt",
+        metadata_json=run_dir / "metadata.json",
+        live_html=run_dir / "live.html",
+        index_html=run_dir / "index.html",
+        final_md=run_dir / "final.md",
+        final_html=run_dir / "final.html",
+    )
+    state_log = tmp_path / "full_states_log_2026-05-25.json"
+    state_log.write_text(
+        json.dumps(
+            {
+                "sentiment_report": "# Sentiment\n\nMixed.",
+                "investment_debate_state": {
+                    "bull_history": "## Bull\n\nUptrend.",
+                    "bear_history": "## Bear\n\nCrowded.",
+                    "judge_decision": "## RM\n\nScale in.",
+                },
+                "trader_investment_decision": "## Trader\n\nBuy.",
+                "risk_debate_state": {"judge_decision": "## PM\n\nOverweight."},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        output_runner,
+        "parse_args",
+        lambda argv=None: argparse.Namespace(ticker="QQQ", analysis_date="2026-05-25", stack="fmp", port=8765),
+    )
+    monkeypatch.setattr(output_runner, "resolve_run_request", lambda ticker, analysis_date: ("QQQ", "2026-05-25"))
+    monkeypatch.setattr(output_runner, "build_run_slug", lambda *args, **kwargs: "qqq-test-run")
+    monkeypatch.setattr(output_runner, "build_paths", lambda run_path: paths)
+    monkeypatch.setattr(output_runner, "ensure_http_server", lambda *args, **kwargs: None)
+    monkeypatch.setattr(output_runner, "state_log_path", lambda ticker, analysis_date: state_log)
+    def fake_stream(command, cwd, env, out_handle, capture, on_output=None):
+        if "run_fmp_mcp_stack.py" in " ".join(command):
+            state_log.write_text(
+                json.dumps(
+                    {
+                        "sentiment_report": "# Sentiment\n\nMixed.",
+                        "investment_debate_state": {
+                            "bull_history": "## Bull\n\nUptrend.",
+                            "bear_history": "## Bear\n\nCrowded.",
+                            "judge_decision": "## RM\n\nScale in.",
+                        },
+                        "trader_investment_decision": "## Trader\n\nBuy.",
+                        "risk_debate_state": {"judge_decision": "## PM\n\nOverweight."},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            if on_output:
+                on_output()
+            mid_run = json.loads(paths.metadata_json.read_text())
+            assert any(artifact["slug"] == "bullish-report" for artifact in mid_run["report_artifacts"])
+            assert "Published reports" in paths.index_html.read_text()
+        return 0
+
+    monkeypatch.setattr(output_runner, "stream_command", fake_stream)
+
+    exit_code = output_runner.run([])
+
+    assert exit_code == 0
+    metadata = json.loads(paths.metadata_json.read_text())
+    assert metadata["status"] == "completed"
+    assert metadata["state_log"] == "full_states_log_2026-05-25.json"
+    assert any(artifact["slug"] == "bullish-report" for artifact in metadata["report_artifacts"])
+    assert (run_dir / "full_states_log_2026-05-25.json").exists()
+    assert (run_dir / "bullish-report.md").exists()
+    assert (run_dir / "bullish-report.html").exists()
