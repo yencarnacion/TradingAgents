@@ -38,6 +38,12 @@ class ModelCapabilities:
     # DeepSeek thinking-mode models 400 if reasoning_content from prior
     # assistant turns is not echoed back on the next request.
     requires_reasoning_content_roundtrip: bool = False
+    # MiniMax M2.x reasoning models need ``reasoning_split=True`` so the
+    # <think> block lands in ``reasoning_details`` instead of polluting
+    # ``content``. The flag is rejected by non-reasoning MiniMax models
+    # (Coding Plan, MiniMax-Text-01, etc.), so we only set it where the
+    # model actually consumes it. (#826)
+    requires_reasoning_split: bool = False
 
 
 # DeepSeek's thinking models accept the ``tools`` array but reject the
@@ -74,6 +80,14 @@ _MINIMAX_THINKING = ModelCapabilities(
     supports_json_mode=False,
     supports_json_schema=False,
     preferred_structured_method="function_calling",
+    requires_reasoning_split=True,
+)
+
+_QWEN_COMPAT_LOCAL = ModelCapabilities(
+    supports_tool_choice=False,
+    supports_json_mode=True,
+    supports_json_schema=True,
+    preferred_structured_method="function_calling",
 )
 
 _DEFAULT = ModelCapabilities(
@@ -99,6 +113,9 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "MiniMax-M2.1": _MINIMAX_THINKING,
     "MiniMax-M2.1-highspeed": _MINIMAX_THINKING,
     "MiniMax-M2": _MINIMAX_THINKING,
+    # Local OpenAI-compatible Qwen endpoint on this workspace rejects
+    # LangChain's tool_choice="auto" unless server flags are enabled.
+    "Qwen/Qwen3.6-27B-FP8": _QWEN_COMPAT_LOCAL,
 }
 
 # Forward-compat patterns. New ``deepseek-v5-*`` / ``deepseek-reasoner-*``

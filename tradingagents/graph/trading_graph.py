@@ -29,6 +29,13 @@ from tradingagents.dataflows.config import set_config
 # Import the new abstract tool methods from agent_utils
 from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
+    get_intraday_bars,
+    get_session_bars,
+    get_ticker_snapshot,
+    get_market_regime,
+    get_last_trade,
+    get_nbbo_quotes,
+    get_options_chain,
     get_indicators,
     get_fundamentals,
     get_balance_sheet,
@@ -41,6 +48,7 @@ from tradingagents.agents.utils.agent_utils import (
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
+from .debug_stream import split_new_messages
 from .setup import GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
@@ -114,6 +122,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            analyst_concurrency_limit=self.config.get("analyst_concurrency_limit", 1),
         )
 
         self.propagator = Propagator(
@@ -159,8 +168,15 @@ class TradingAgentsGraph:
         return {
             "market": ToolNode(
                 [
-                    # Core stock data tools
+                    # Core market structure tools
                     get_stock_data,
+                    get_intraday_bars,
+                    get_session_bars,
+                    get_ticker_snapshot,
+                    get_market_regime,
+                    get_last_trade,
+                    get_nbbo_quotes,
+                    get_options_chain,
                     # Technical indicators
                     get_indicators,
                 ]
@@ -291,11 +307,14 @@ class TradingAgentsGraph:
         if updates:
             self.memory_log.batch_update_with_outcomes(updates)
 
-    def propagate(self, company_name, trade_date):
+    def propagate(self, company_name, trade_date, asset_type: str = "stock"):
         """Run the trading agents graph for a company on a specific date.
 
-        When ``checkpoint_enabled`` is set in config, the graph is recompiled
-        with a per-ticker SqliteSaver so a crashed run can resume from the last
+        ``asset_type`` selects between the stock pipeline (default) and the
+        crypto pipeline (``"crypto"``) shipped in #567 — the CLI auto-detects
+        from the ticker; programmatic callers pass it explicitly. When
+        ``checkpoint_enabled`` is set in config, the graph is recompiled with
+        a per-ticker SqliteSaver so a crashed run can resume from the last
         successful node on a subsequent invocation with the same ticker+date.
         """
         self.ticker = company_name
@@ -322,19 +341,19 @@ class TradingAgentsGraph:
                 logger.info("Starting fresh for %s on %s", company_name, trade_date)
 
         try:
-            return self._run_graph(company_name, trade_date)
+            return self._run_graph(company_name, trade_date, asset_type=asset_type)
         finally:
             if self._checkpointer_ctx is not None:
                 self._checkpointer_ctx.__exit__(None, None, None)
                 self._checkpointer_ctx = None
                 self.graph = self.workflow.compile()
 
-    def _run_graph(self, company_name, trade_date):
+    def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM.
         past_context = self.memory_log.get_past_context(company_name)
         init_agent_state = self.propagator.create_initial_state(
-            company_name, trade_date, past_context=past_context
+            company_name, trade_date, asset_type=asset_type, past_context=past_context
         )
         args = self.propagator.get_graph_args()
 
@@ -345,12 +364,14 @@ class TradingAgentsGraph:
 
         if self.debug:
             trace = []
+            seen_message_signatures = []
             for chunk in self.graph.stream(init_agent_state, **args):
-                if len(chunk["messages"]) == 0:
-                    pass
-                else:
-                    chunk["messages"][-1].pretty_print()
-                    trace.append(chunk)
+                trace.append(chunk)
+                new_messages, seen_message_signatures = split_new_messages(
+                    chunk.get("messages", []), seen_message_signatures
+                )
+                for message in new_messages:
+                    message.pretty_print()
             # Streamed chunks are per-node deltas. Merge them so the returned
             # state matches what graph.invoke() yields in the non-debug path.
             final_state = {}

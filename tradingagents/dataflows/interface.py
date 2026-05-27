@@ -11,6 +11,34 @@ from .y_finance import (
     get_insider_transactions as get_yfinance_insider_transactions,
 )
 from .yfinance_news import get_news_yfinance, get_global_news_yfinance
+from .massive import (
+    get_stock_data as get_massive_stock,
+    get_indicators as get_massive_indicators,
+    get_fundamentals as get_massive_fundamentals,
+    get_balance_sheet as get_massive_balance_sheet,
+    get_cashflow as get_massive_cashflow,
+    get_income_statement as get_massive_income_statement,
+    get_news as get_massive_news,
+)
+from .fmp import (
+    get_stock_data as get_fmp_stock,
+    get_indicators as get_fmp_indicators,
+    get_fundamentals as get_fmp_fundamentals,
+    get_balance_sheet as get_fmp_balance_sheet,
+    get_cashflow as get_fmp_cashflow,
+    get_income_statement as get_fmp_income_statement,
+    get_news as get_fmp_news,
+    get_global_news as get_fmp_global_news,
+    get_insider_transactions as get_fmp_insider_transactions,
+)
+from .perplexity import (
+    get_news as get_perplexity_news,
+    get_global_news as get_perplexity_global_news,
+)
+from .grok import (
+    get_news as get_grok_news,
+    get_global_news as get_grok_global_news,
+)
 from .alpha_vantage import (
     get_stock as get_alpha_vantage_stock,
     get_indicator as get_alpha_vantage_indicator,
@@ -63,6 +91,10 @@ TOOLS_CATEGORIES = {
 VENDOR_LIST = [
     "yfinance",
     "alpha_vantage",
+    "massive",
+    "perplexity",
+    "grok",
+    "fmp",
 ]
 
 # Mapping of methods to their vendor-specific implementations
@@ -71,41 +103,61 @@ VENDOR_METHODS = {
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
+        "massive": get_massive_stock,
+        "fmp": get_fmp_stock,
     },
     # technical_indicators
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
+        "massive": get_massive_indicators,
+        "fmp": get_fmp_indicators,
     },
     # fundamental_data
     "get_fundamentals": {
         "alpha_vantage": get_alpha_vantage_fundamentals,
         "yfinance": get_yfinance_fundamentals,
+        "massive": get_massive_fundamentals,
+        "fmp": get_fmp_fundamentals,
     },
     "get_balance_sheet": {
         "alpha_vantage": get_alpha_vantage_balance_sheet,
         "yfinance": get_yfinance_balance_sheet,
+        "massive": get_massive_balance_sheet,
+        "fmp": get_fmp_balance_sheet,
     },
     "get_cashflow": {
         "alpha_vantage": get_alpha_vantage_cashflow,
         "yfinance": get_yfinance_cashflow,
+        "massive": get_massive_cashflow,
+        "fmp": get_fmp_cashflow,
     },
     "get_income_statement": {
         "alpha_vantage": get_alpha_vantage_income_statement,
         "yfinance": get_yfinance_income_statement,
+        "massive": get_massive_income_statement,
+        "fmp": get_fmp_income_statement,
     },
     # news_data
     "get_news": {
         "alpha_vantage": get_alpha_vantage_news,
         "yfinance": get_news_yfinance,
+        "massive": get_massive_news,
+        "perplexity": get_perplexity_news,
+        "grok": get_grok_news,
+        "fmp": get_fmp_news,
     },
     "get_global_news": {
         "yfinance": get_global_news_yfinance,
         "alpha_vantage": get_alpha_vantage_global_news,
+        "perplexity": get_perplexity_global_news,
+        "grok": get_grok_global_news,
+        "fmp": get_fmp_global_news,
     },
     "get_insider_transactions": {
         "alpha_vantage": get_alpha_vantage_insider_transactions,
         "yfinance": get_yfinance_insider_transactions,
+        "fmp": get_fmp_insider_transactions,
     },
 }
 
@@ -131,6 +183,22 @@ def get_vendor(category: str, method: str = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
+def _should_try_fallback(result) -> bool:
+    """Return True when a vendor result looks like a fetch failure or empty payload."""
+    if result is None:
+        return True
+    if not isinstance(result, str):
+        return False
+
+    text = result.strip().lower()
+    if not text:
+        return True
+    return (
+        text.startswith("error retrieving")
+        or text.startswith("failed to")
+        or (text.startswith("no ") and (" found" in text or " available" in text))
+    )
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
@@ -147,16 +215,31 @@ def route_to_vendor(method: str, *args, **kwargs):
         if vendor not in fallback_vendors:
             fallback_vendors.append(vendor)
 
-    for vendor in fallback_vendors:
+    last_error = None
+    for index, vendor in enumerate(fallback_vendors):
         if vendor not in VENDOR_METHODS[method]:
             continue
 
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
+        has_more_vendors = index < len(fallback_vendors) - 1
 
         try:
-            return impl_func(*args, **kwargs)
+            result = impl_func(*args, **kwargs)
         except AlphaVantageRateLimitError:
             continue  # Only rate limits trigger fallback
+        except Exception as exc:
+            last_error = exc
+            if has_more_vendors:
+                continue
+            raise
 
+        if has_more_vendors and _should_try_fallback(result):
+            last_error = result
+            continue
+
+        return result
+
+    if last_error:
+        raise RuntimeError(f"No available vendor for '{method}'; last failure: {last_error}")
     raise RuntimeError(f"No available vendor for '{method}'")

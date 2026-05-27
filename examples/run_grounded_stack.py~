@@ -1,0 +1,36 @@
+from copy import deepcopy
+
+from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+
+TICKER = "NVDA"
+ANALYSIS_DATE = "2026-01-15"
+
+
+def build_config():
+    config = deepcopy(DEFAULT_CONFIG)
+    config["llm_provider"] = "openai"  # change if you prefer xai / anthropic / google / etc.
+    config["deep_think_llm"] = "gpt-5.4"
+    config["quick_think_llm"] = "gpt-5.4-mini"
+
+    # Vendor routing added in this patch set.
+    config["data_vendors"]["core_stock_apis"] = "massive"
+    config["data_vendors"]["fundamental_data"] = "massive"
+    config["data_vendors"]["news_data"] = "perplexity"
+    config["tool_vendors"]["get_news"] = "perplexity"
+    config["tool_vendors"]["get_global_news"] = "grok"
+    config["sentiment_x_source"] = "grok"
+
+    return config
+
+
+def main():
+    config = build_config()
+    graph = TradingAgentsGraph(debug=True, config=config)
+    _, decision = graph.propagate(TICKER, ANALYSIS_DATE)
+    print(decision)
+
+
+if __name__ == "__main__":
+    main()

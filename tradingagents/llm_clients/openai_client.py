@@ -32,6 +32,18 @@ class NormalizedChatOpenAI(ChatOpenAI):
     def invoke(self, input, config=None, **kwargs):
         return normalize_content(super().invoke(input, config, **kwargs))
 
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        caps = get_capabilities(self.model_name)
+        # Some OpenAI-compatible backends accept neither LangChain's
+        # tool_choice payload nor the presence of a tools array unless extra
+        # server-side flags are enabled. For those models we fall back to the
+        # prompt-driven XML-ish tool-call protocol parsed by
+        # coerce_ai_message_tool_markup(), so the agent can still call tools
+        # without native API tool binding.
+        if not caps.supports_tool_choice:
+            return super().bind(**kwargs)
+        return super().bind_tools(tools, tool_choice=tool_choice, **kwargs)
+
     def with_structured_output(self, schema, *, method=None, **kwargs):
         caps = get_capabilities(self.model_name)
         if caps.preferred_structured_method == "none":
@@ -118,6 +130,11 @@ class MinimaxChatOpenAI(NormalizedChatOpenAI):
     ``reasoning_split=True`` in the request body redirects the thinking
     block into ``reasoning_details`` so ``content`` stays clean.
 
+    The flag is gated by ``ModelCapabilities.requires_reasoning_split``
+    because non-reasoning MiniMax endpoints (Coding Plan, MiniMax-Text-01)
+    reject the parameter via the openai SDK's strict kwarg validation
+    (#826).
+
     Tool-choice handling for M2.x — those models accept only the string
     enum ``{"none", "auto"}`` and reject langchain's function-spec dict —
     is handled by the capability dispatch in
@@ -126,7 +143,8 @@ class MinimaxChatOpenAI(NormalizedChatOpenAI):
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-        payload.setdefault("reasoning_split", True)
+        if get_capabilities(self.model_name).requires_reasoning_split:
+            payload.setdefault("reasoning_split", True)
         return payload
 
 
@@ -222,8 +240,11 @@ class OpenAIClient(BaseLLMClient):
                 llm_kwargs[key] = self.kwargs[key]
 
         # Native OpenAI: use Responses API for consistent behavior across
-        # all model families. Third-party providers use Chat Completions.
-        if self.provider == "openai":
+        # all model families. When the user points the OpenAI-compatible client
+        # at a custom base_url (for example a local Qwen endpoint), stay on
+        # Chat Completions because many compatibility layers do not implement
+        # /v1/responses correctly and reject LangChain's Responses payload.
+        if self.provider == "openai" and not self.base_url:
             llm_kwargs["use_responses_api"] = True
 
         # Provider-specific quirks live in their own subclasses so the

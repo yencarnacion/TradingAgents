@@ -225,6 +225,23 @@ print(decision)
 
 See `tradingagents/default_config.py` for all configuration options.
 
+### Example: grounded market-data / research vendor mix
+
+```python
+config = DEFAULT_CONFIG.copy()
+config["data_vendors"]["core_stock_apis"] = "massive"        # OHLCV / price history
+config["data_vendors"]["fundamental_data"] = "massive"       # ratios + financial statements
+config["data_vendors"]["news_data"] = "perplexity"            # web/SEC-grounded company news by default
+config["tool_vendors"]["get_news"] = "perplexity"            # company-specific news + SEC grounding
+config["tool_vendors"]["get_global_news"] = "grok"           # macro/news brief via web search
+config["sentiment_x_source"] = "grok"                         # optional X/Twitter sentiment block
+```
+
+Environment variables used by these adapters:
+- `MASSIVE_API_KEY` (or `POLYGON_API_KEY`)
+- `PERPLEXITY_API_KEY`
+- `XAI_API_KEY`
+
 ## Persistence and Recovery
 
 TradingAgents persists two kinds of state across runs.
