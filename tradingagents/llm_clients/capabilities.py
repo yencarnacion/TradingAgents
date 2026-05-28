@@ -90,6 +90,8 @@ _QWEN_COMPAT_LOCAL = ModelCapabilities(
     preferred_structured_method="function_calling",
 )
 
+LOCAL_OPENAI_COMPAT = _QWEN_COMPAT_LOCAL
+
 _DEFAULT = ModelCapabilities(
     supports_tool_choice=True,
     supports_json_mode=True,
@@ -124,6 +126,7 @@ _BY_PATTERN: list[tuple[re.Pattern[str], ModelCapabilities]] = [
     (re.compile(r"^deepseek-v\d"), _DEEPSEEK_THINKING),
     (re.compile(r"^deepseek-reasoner"), _DEEPSEEK_THINKING),
     (re.compile(r"^MiniMax-M\d"), _MINIMAX_THINKING),
+    (re.compile(r"^(Qwen/)?Qwen3\..*FP8$", re.IGNORECASE), _QWEN_COMPAT_LOCAL),
 ]
 
 

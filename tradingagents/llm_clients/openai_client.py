@@ -1,13 +1,35 @@
+import ipaddress
 import os
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
 from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
-from .capabilities import get_capabilities
+from .capabilities import LOCAL_OPENAI_COMPAT, get_capabilities
 from .validators import validate_model
+
+
+def _is_private_openai_compatible_base_url(base_url: Any) -> bool:
+    """Return True for local/private OpenAI-compatible servers.
+
+    vLLM and similar local servers often expose the OpenAI Chat Completions
+    shape but reject LangChain's automatic ``tool_choice`` payload unless
+    the server is launched with tool-parser flags. Public hosted providers
+    keep their model-specific capability rows.
+    """
+    if not base_url:
+        return False
+    parsed = urlparse(str(base_url))
+    host = parsed.hostname or str(base_url).split("/", 1)[0].split(":", 1)[0]
+    if host in {"localhost", "ip6-localhost"} or host.endswith(".local"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return False
 
 
 class NormalizedChatOpenAI(ChatOpenAI):
@@ -32,6 +54,14 @@ class NormalizedChatOpenAI(ChatOpenAI):
     def invoke(self, input, config=None, **kwargs):
         return normalize_content(super().invoke(input, config, **kwargs))
 
+    def _capabilities(self):
+        caps = get_capabilities(self.model_name)
+        if caps.supports_tool_choice and _is_private_openai_compatible_base_url(
+            getattr(self, "openai_api_base", None)
+        ):
+            return LOCAL_OPENAI_COMPAT
+        return caps
+
     def bind_tools(
         self,
         tools,
@@ -42,7 +72,7 @@ class NormalizedChatOpenAI(ChatOpenAI):
         response_format=None,
         **kwargs,
     ):
-        caps = get_capabilities(self.model_name)
+        caps = self._capabilities()
         # Some OpenAI-compatible backends accept neither LangChain's
         # tool_choice payload nor the presence of a tools array unless extra
         # server-side flags are enabled. For ordinary agent tools, fall back to
@@ -63,7 +93,7 @@ class NormalizedChatOpenAI(ChatOpenAI):
         )
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
-        caps = get_capabilities(self.model_name)
+        caps = self._capabilities()
         if caps.preferred_structured_method == "none":
             raise NotImplementedError(
                 f"{self.model_name} has no structured-output method available; "

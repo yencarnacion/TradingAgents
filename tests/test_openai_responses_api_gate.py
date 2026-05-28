@@ -91,3 +91,41 @@ def test_structured_output_keeps_schema_tool_for_local_qwen():
         tool.get("function", {}).get("name") == "Pick"
         for tool in kwargs.get("tools", [])
     )
+
+
+def test_structured_output_suppresses_tool_choice_for_private_base_url_unknown_model():
+    class Pick(BaseModel):
+        action: str
+
+    llm = mod.NormalizedChatOpenAI(
+        model="locally-served-model",
+        api_key=SecretStr("x"),
+        base_url="http://10.17.17.99:8005/v1",
+    )
+
+    bound = llm.with_structured_output(Pick)
+    first = bound.steps[0] if hasattr(bound, "steps") else bound
+    kwargs = getattr(first, "kwargs", {})
+
+    assert "tool_choice" not in kwargs
+    assert any(
+        tool.get("function", {}).get("name") == "Pick"
+        for tool in kwargs.get("tools", [])
+    )
+
+
+def test_structured_output_keeps_tool_choice_for_public_base_url_unknown_model():
+    class Pick(BaseModel):
+        action: str
+
+    llm = mod.NormalizedChatOpenAI(
+        model="public-compatible-model",
+        api_key=SecretStr("x"),
+        base_url="https://example.com/v1",
+    )
+
+    bound = llm.with_structured_output(Pick)
+    first = bound.steps[0] if hasattr(bound, "steps") else bound
+    kwargs = getattr(first, "kwargs", {})
+
+    assert "tool_choice" in kwargs

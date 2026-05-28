@@ -55,6 +55,16 @@ class TestPatternMatches:
         caps = get_capabilities("MiniMax-M4-highspeed")
         assert caps.supports_tool_choice is False
 
+    def test_qwen3_variants_reject_tool_choice_on_local_compat_servers(self):
+        for model in (
+            "Qwen/Qwen3.6-27B-FP8",
+            "Qwen3.6-27B-FP8",
+            "qwen3.6-27b-fp8",
+        ):
+            caps = get_capabilities(model)
+            assert caps.supports_tool_choice is False
+            assert caps.preferred_structured_method == "function_calling"
+
 
 @pytest.mark.unit
 class TestMinimaxExactMatches:

@@ -4,6 +4,8 @@ import importlib
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from tradingagents.agents.utils.agent_utils import extract_tool_calls_from_markup
+
 
 class _FakePrompt:
     def partial(self, **kwargs):
@@ -52,6 +54,64 @@ def _state() -> dict:
         "trade_date": "2026-05-26",
         "asset_type": "stock",
     }
+
+
+def test_extracts_batched_json_calls_from_fenced_block():
+    calls = extract_tool_calls_from_markup(
+        """I'll gather comprehensive fundamental information.
+
+```json
+{"calls": [
+  {"call": {"tool": "get_fundamentals"}},
+  {"call": {"tool": "get_balance_sheet"}},
+  {"call": {"tool": "get_cashflow"}},
+  {"call": {"tool": "get_income_statement"}}
+]}
+```"""
+    )
+
+    assert [call["name"] for call in calls] == [
+        "get_fundamentals",
+        "get_balance_sheet",
+        "get_cashflow",
+        "get_income_statement",
+    ]
+    assert all(call["args"] == {} for call in calls)
+
+
+def test_extracts_simple_calls_from_repeated_unclosed_tool_call_markers():
+    calls = extract_tool_calls_from_markup(
+        """<tool_call>
+<tool_call>
+get_global_news
+<tool_call>
+<tool_call>
+get_news
+<tool_call>
+<tool_call>
+get_global_news(curr_date="2026-05-27", look_back_days=7, limit=10)
+<tool_call>
+get_news(query="SPY S&P 500 market news", start_date="2026-05-20", end_date="2026-05-27")"""
+    )
+
+    assert calls == [
+        {
+            "name": "get_global_news",
+            "args": {"curr_date": "2026-05-27", "look_back_days": 7, "limit": 10},
+            "id": "call_1",
+            "type": "tool_call",
+        },
+        {
+            "name": "get_news",
+            "args": {
+                "query": "SPY S&P 500 market news",
+                "start_date": "2026-05-20",
+                "end_date": "2026-05-27",
+            },
+            "id": "call_2",
+            "type": "tool_call",
+        },
+    ]
 
 
 def test_news_analyst_executes_markup_tool_call_and_returns_final_report(monkeypatch):

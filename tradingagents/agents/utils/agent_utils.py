@@ -108,6 +108,12 @@ def _coerce_tool_parameter(value: str):
 
 
 def _tool_call_from_mapping(payload: dict[str, Any], call_id: int) -> dict[str, Any] | None:
+    call = payload.get("call")
+    if isinstance(call, dict):
+        call_tool = _tool_call_from_mapping(call, call_id)
+        if call_tool is not None:
+            return call_tool
+
     action = payload.get("action")
     if isinstance(action, dict):
         action_call = _tool_call_from_mapping(action, call_id)
@@ -117,7 +123,13 @@ def _tool_call_from_mapping(payload: dict[str, Any], call_id: int) -> dict[str, 
     function = payload.get("function")
     if isinstance(function, dict):
         function_name = function.get("name")
-        raw_args = function.get("arguments") or payload.get("args") or payload.get("parameters") or {}
+        raw_args = (
+            function.get("arguments")
+            or payload.get("args")
+            or payload.get("parameters")
+            or payload.get("arguments")
+            or {}
+        )
         if isinstance(raw_args, str):
             try:
                 raw_args = json.loads(raw_args)
@@ -125,7 +137,7 @@ def _tool_call_from_mapping(payload: dict[str, Any], call_id: int) -> dict[str, 
                 raw_args = {}
     else:
         function_name = payload.get("tool") or payload.get("name") or function
-        raw_args = payload.get("args") or payload.get("parameters") or {}
+        raw_args = payload.get("args") or payload.get("parameters") or payload.get("arguments") or {}
 
     if not isinstance(function_name, str) or not function_name.strip():
         return None
@@ -138,6 +150,29 @@ def _tool_call_from_mapping(payload: dict[str, Any], call_id: int) -> dict[str, 
         "id": f"call_{call_id}",
         "type": "tool_call",
     }
+
+
+def _iter_json_tool_payloads(payload: Any):
+    if isinstance(payload, list):
+        for item in payload:
+            yield from _iter_json_tool_payloads(item)
+        return
+
+    if not isinstance(payload, dict):
+        return
+
+    calls = payload.get("calls")
+    if isinstance(calls, list):
+        for item in calls:
+            yield from _iter_json_tool_payloads(item)
+        return
+
+    call = payload.get("call")
+    if isinstance(call, dict):
+        yield call
+        return
+
+    yield payload
 
 
 def _extract_json_tool_calls(content: str, start_index: int) -> list[dict[str, Any]]:
@@ -153,10 +188,7 @@ def _extract_json_tool_calls(content: str, start_index: int) -> list[dict[str, A
         except json.JSONDecodeError:
             continue
 
-        items = payload if isinstance(payload, list) else [payload]
-        for item in items:
-            if not isinstance(item, dict):
-                continue
+        for item in _iter_json_tool_payloads(payload):
             tool_call = _tool_call_from_mapping(item, start_index + len(calls))
             if tool_call is not None:
                 calls.append(tool_call)
@@ -170,8 +202,18 @@ def _extract_simple_call_tool_calls(content: str, start_index: int) -> list[dict
     stripped = content.strip()
     if _SIMPLE_CALL_RE.match(stripped):
         candidates.append(stripped)
+    for line in content.splitlines():
+        candidate = line.strip()
+        if candidate == "<tool_call>" or candidate == "</tool_call>":
+            continue
+        if _SIMPLE_CALL_RE.match(candidate):
+            candidates.append(candidate)
 
+    seen_candidates: set[str] = set()
     for candidate in candidates:
+        if candidate in seen_candidates:
+            continue
+        seen_candidates.add(candidate)
         call_match = _SIMPLE_CALL_RE.match(candidate)
         if not call_match:
             continue

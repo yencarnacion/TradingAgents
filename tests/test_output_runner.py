@@ -12,11 +12,13 @@ from tradingagents.output_runner import (
     RunPaths,
     build_app_command,
     build_run_slug,
+    detect_public_host,
     extract_final_decision,
     extract_state_reports,
     format_duration,
     parse_args,
     publish_runtime_artifacts,
+    public_run_url,
     render_index_html,
     render_live_html,
     render_markdown_html,
@@ -91,6 +93,25 @@ def test_parse_args_uses_env_default_stack(monkeypatch):
     assert args.stack == "grounded"
 
 
+def test_public_url_uses_override_or_detected_host(monkeypatch):
+    assert detect_public_host("192.168.1.50") == "192.168.1.50"
+    assert public_run_url(8765, "qqq-run", "live.html", "192.168.1.50") == (
+        "http://192.168.1.50:8765/qqq-run/live.html"
+    )
+
+
+def test_report_artifacts_use_relative_urls_without_public_base(tmp_path):
+    artifacts = write_report_artifacts(
+        tmp_path,
+        "QQQ",
+        "2026-05-25",
+        {"sentiment_report": "# Sentiment\n\nMixed."},
+    )
+
+    assert artifacts[0]["html_url"] == "sentiment-report.html"
+    assert artifacts[0]["markdown_url"] == "sentiment-report.md"
+
+
 def test_render_live_html_includes_structured_view_hooks():
     html = render_live_html("Ticker Agents Run: SPY")
 
@@ -103,6 +124,9 @@ def test_render_live_html_includes_structured_view_hooks():
     assert "Published reports" in html
     assert "renderReportArtifacts" in html
     assert "reportGroups" in html
+    assert "body === 'Continue'" in html
+    assert "const toolRegex = /<tool_call>" in html
+    assert "|$)/g" in html
 
 
 def test_render_markdown_html_falls_back_when_markdown_missing():
@@ -617,7 +641,13 @@ def test_run_finalizes_metadata_even_if_final_rendering_fails(tmp_path, monkeypa
     monkeypatch.setattr(
         output_runner,
         "parse_args",
-        lambda argv=None: argparse.Namespace(ticker="QQQ", analysis_date="2026-05-25", stack="fmp", port=8765),
+        lambda argv=None: argparse.Namespace(
+            ticker="QQQ",
+            analysis_date="2026-05-25",
+            stack="fmp",
+            port=8765,
+            public_host="192.168.1.50",
+        ),
     )
     monkeypatch.setattr(output_runner, "resolve_run_request", lambda ticker, analysis_date: ("QQQ", "2026-05-25"))
     monkeypatch.setattr(output_runner, "build_run_slug", lambda *args, **kwargs: "qqq-test-run")
@@ -673,6 +703,10 @@ def test_run_finalizes_metadata_even_if_final_rendering_fails(tmp_path, monkeypa
     assert metadata["exit_code"] == 0
     assert metadata["finished_at"] is not None
     assert metadata["has_final_markdown"] is True
+    assert metadata["live_url"] == "live.html"
+    assert metadata["index_url"] == "index.html"
+    assert metadata["raw_url"] == "console.txt"
+    assert metadata["final_html_url"] == "final.html"
     assert "final artifact rendering failed: boom" == metadata["artifact_warning"]
     assert paths.final_md.read_text().strip() == "Overweight"
     summary = paths.console_txt.read_text()
@@ -715,7 +749,13 @@ def test_run_publishes_state_log_reports(tmp_path, monkeypatch):
     monkeypatch.setattr(
         output_runner,
         "parse_args",
-        lambda argv=None: argparse.Namespace(ticker="QQQ", analysis_date="2026-05-25", stack="fmp", port=8765),
+        lambda argv=None: argparse.Namespace(
+            ticker="QQQ",
+            analysis_date="2026-05-25",
+            stack="fmp",
+            port=8765,
+            public_host="192.168.1.50",
+        ),
     )
     monkeypatch.setattr(output_runner, "resolve_run_request", lambda ticker, analysis_date: ("QQQ", "2026-05-25"))
     monkeypatch.setattr(output_runner, "build_run_slug", lambda *args, **kwargs: "qqq-test-run")

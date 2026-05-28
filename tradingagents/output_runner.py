@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 
 DEFAULT_TICKER = "SPY"
-DEFAULT_PUBLIC_HOST = os.getenv("TICKER_AGENTS_PUBLIC_HOST", "10.17.17.98")
+DEFAULT_PUBLIC_HOST = os.getenv("TICKER_AGENTS_PUBLIC_HOST")
 DEFAULT_PORT = int(os.getenv("TICKER_AGENTS_OUTPUT_PORT", "8765"))
 NEW_YORK_TZ = ZoneInfo("America/New_York")
 FINAL_BEGIN = "=== FINAL_DECISION_MARKDOWN_BEGIN ==="
@@ -244,8 +244,38 @@ def format_timestamp_for_display(raw: Optional[str]) -> str:
 
 def _join_public_url(base_url: Optional[str], filename: str) -> Optional[str]:
     if not base_url:
-        return None
+        return filename
     return f"{base_url.rstrip('/')}/{filename}"
+
+
+def detect_public_host(override: Optional[str] = None) -> str:
+    """Best-effort host for URLs printed to the terminal.
+
+    HTML and metadata use relative links so they follow whichever host the
+    browser opened. This is only for the initial convenience URL printed by
+    the runner.
+    """
+    if override:
+        return override
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            host = sock.getsockname()[0]
+            if host and not host.startswith("127."):
+                return host
+    except OSError:
+        pass
+    try:
+        host = socket.gethostbyname(socket.gethostname())
+        if host and not host.startswith("127."):
+            return host
+    except OSError:
+        pass
+    return "localhost"
+
+
+def public_run_url(port: int, slug: str, filename: str, host: Optional[str] = None) -> str:
+    return f"http://{detect_public_host(host)}:{port}/{slug}/{filename}"
 
 
 def summarize_report_artifacts(artifacts: list[dict[str, str]]) -> dict[str, Any]:
@@ -1111,7 +1141,9 @@ def render_live_html(title: str) -> str:
 
       function flushCurrent() {{
         const body = current.join('\n').trim();
-        if (body) entries.push({{ kind: currentKind, label: currentLabel, body }});
+        if (body && !(currentKind === 'human' && body === 'Continue')) {{
+          entries.push({{ kind: currentKind, label: currentLabel, body }});
+        }}
         current = [];
       }}
 
@@ -1138,7 +1170,7 @@ def render_live_html(title: str) -> str:
           expanded.push(entry);
           continue;
         }}
-        const toolRegex = /<tool_call>[\\s\\S]*?<\\/tool_call>/g;
+        const toolRegex = /<tool_call>[\\s\\S]*?(?:<\\/tool_call>|$)/g;
         const toolMatches = [...entry.body.matchAll(toolRegex)];
         const plain = entry.body.replace(toolRegex, '').trim();
         if (plain) expanded.push({{ kind:'ai', label:'AI output', body: plain }});
@@ -1413,6 +1445,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Example stack to run: fmp (default, Massive+FMP hybrid) or grounded",
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="HTTP port for the output viewer")
+    parser.add_argument(
+        "--public-host",
+        default=DEFAULT_PUBLIC_HOST,
+        help=(
+            "Host/IP to print for browser URLs. Defaults to TICKER_AGENTS_PUBLIC_HOST "
+            "or the current machine's detected LAN IP."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1438,9 +1478,14 @@ def run(argv: Optional[list[str]] = None) -> int:
     paths.run_dir.mkdir(parents=True, exist_ok=True)
     ensure_http_server(output_root, args.port)
 
-    live_url = f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}/live.html"
-    index_url = f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}/index.html"
-    raw_url = f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}/console.txt"
+    public_host = detect_public_host(args.public_host)
+    display_live_url = public_run_url(args.port, slug, "live.html", public_host)
+    display_index_url = public_run_url(args.port, slug, "index.html", public_host)
+    display_raw_url = public_run_url(args.port, slug, "console.txt", public_host)
+    display_final_url = public_run_url(args.port, slug, "final.html", public_host)
+    live_url = "live.html"
+    index_url = "index.html"
+    raw_url = "console.txt"
 
     metadata = {
         "title": f"Ticker Agents Run: {ticker} @ {analysis_date}",
@@ -1457,8 +1502,8 @@ def run(argv: Optional[list[str]] = None) -> int:
         "live_url": live_url,
         "index_url": index_url,
         "raw_url": raw_url,
-        "final_html_url": f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}/final.html",
-        "final_md_url": f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}/final.md",
+        "final_html_url": "final.html",
+        "final_md_url": "final.md",
         "has_final_markdown": False,
         "report_artifacts": [],
         "report_summary": {"count": 0, "groups": []},
@@ -1471,9 +1516,9 @@ def run(argv: Optional[list[str]] = None) -> int:
 
     banner = (
         f"Run directory: {paths.run_dir}\n"
-        f"Live HTML: {live_url}\n"
-        f"Index: {index_url}\n"
-        f"Raw text: {raw_url}\n\n"
+        f"Live HTML: {display_live_url}\n"
+        f"Index: {display_index_url}\n"
+        f"Raw text: {display_raw_url}\n\n"
     )
     print(banner, end="")
 
@@ -1503,7 +1548,7 @@ def run(argv: Optional[list[str]] = None) -> int:
                 ticker=ticker,
                 analysis_date=analysis_date,
                 state_log=state_log,
-                public_base_url=f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}",
+                public_base_url=None,
                 fallback_state=extract_state_reports("".join(combined_output)),
                 state_log_not_before=started_at.timestamp() - 1.0,
             )
@@ -1523,8 +1568,8 @@ def run(argv: Optional[list[str]] = None) -> int:
                 f"ticker: {ticker}\n"
                 f"analysis_date: {analysis_date}\n"
                 f"started_at: {metadata['started_at']}\n"
-                f"live_html: {live_url}\n"
-                f"raw_text: {raw_url}\n\n"
+                f"live_html: {display_live_url}\n"
+                f"raw_text: {display_raw_url}\n\n"
             )
             out_handle.write(banner)
             out_handle.write(header)
@@ -1594,7 +1639,7 @@ def run(argv: Optional[list[str]] = None) -> int:
                 ticker=ticker,
                 analysis_date=analysis_date,
                 state_log=state_log,
-                public_base_url=f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}",
+                public_base_url=None,
                 fallback_state=final_state_reports,
                 state_log_not_before=started_at.timestamp() - 1.0,
             )
@@ -1622,11 +1667,11 @@ def run(argv: Optional[list[str]] = None) -> int:
 
     print()
     print(f"Completed with status={metadata['status']} in {metadata['duration_hms']}")
-    print(f"Live HTML: {live_url}")
-    print(f"Index: {index_url}")
-    print(f"Raw text: {raw_url}")
+    print(f"Live HTML: {display_live_url}")
+    print(f"Index: {display_index_url}")
+    print(f"Raw text: {display_raw_url}")
     if metadata["has_final_markdown"]:
-        print(f"Rendered final decision: http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}/final.html")
+        print(f"Rendered final decision: {display_final_url}")
     return int(metadata["exit_code"] or 0)
 
 
