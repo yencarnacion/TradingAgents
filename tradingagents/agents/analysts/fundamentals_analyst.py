@@ -59,6 +59,10 @@ def create_fundamentals_analyst(llm):
             chain,
             state["messages"],
             tools=tools,
+            default_tool_args={
+                "ticker": state["company_of_interest"],
+                "curr_date": current_date,
+            },
         )
 
         report = ""

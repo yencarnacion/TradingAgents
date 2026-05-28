@@ -7,10 +7,13 @@ from examples.run_grounded_stack import resolve_inputs
 from tradingagents.output_runner import (
     FINAL_BEGIN,
     FINAL_END,
+    STATE_BEGIN,
+    STATE_END,
     RunPaths,
     build_app_command,
     build_run_slug,
     extract_final_decision,
+    extract_state_reports,
     format_duration,
     parse_args,
     publish_runtime_artifacts,
@@ -49,6 +52,15 @@ def test_format_duration_hms():
 def test_extract_final_decision_from_markers():
     text = f"hello\n{FINAL_BEGIN}\n# Title\n\nBody\n{FINAL_END}\nbye\n"
     assert extract_final_decision(text) == "# Title\n\nBody"
+
+
+def test_extract_state_reports_uses_last_json_block():
+    text = (
+        f"{STATE_BEGIN}\n{{\"news_report\":\"old\"}}\n{STATE_END}\n"
+        f"{STATE_BEGIN}\n{{\"news_report\":\"# News\\n\\nFresh.\"}}\n{STATE_END}\n"
+    )
+
+    assert extract_state_reports(text) == {"news_report": "# News\n\nFresh."}
 
 
 def test_build_run_slug_contains_ticker_and_date():
@@ -517,6 +529,75 @@ def test_publish_runtime_artifacts_still_publishes_technical_chart_without_state
     ]
     assert persisted["report_summary"]["count"] == 2
     assert "Technical Chart" in index_path.read_text()
+
+
+def test_publish_runtime_artifacts_uses_stdout_state_fallback(tmp_path, monkeypatch):
+    from tradingagents import output_runner
+
+    run_dir = tmp_path / "qqq-run"
+    run_dir.mkdir()
+    metadata_path = run_dir / "metadata.json"
+    index_path = run_dir / "index.html"
+    metadata = {
+        "title": "Ticker Agents Run: QQQ @ 2026-05-25",
+        "ticker": "QQQ",
+        "analysis_date": "2026-05-25",
+        "status": "running",
+        "started_at": "2026-05-25T08:00:00+00:00",
+        "finished_at": None,
+        "duration_hms": "00:00:00",
+        "exit_code": None,
+        "command": "python run_fmp_mcp_stack.py QQQ 2026-05-25",
+        "has_final_markdown": False,
+        "state_log": None,
+        "report_artifacts": [],
+        "artifact_warning": None,
+        "stack": "fmp",
+    }
+
+    monkeypatch.setattr(
+        output_runner,
+        "write_technical_indicators_artifact",
+        lambda *args, **kwargs: {
+            "slug": "technical-indicators-report",
+            "title": "Technical Indicators Report",
+            "category": "technical",
+            "markdown_path": "technical-indicators-report.md",
+            "html_path": "technical-indicators-report.html",
+            "markdown_url": "",
+            "html_url": "",
+        },
+    )
+    monkeypatch.setattr(
+        output_runner,
+        "write_technical_chart_artifact",
+        lambda *args, **kwargs: {
+            "slug": "technical-chart",
+            "title": "Technical Chart",
+            "category": "technical",
+            "markdown_path": "technical-chart.md",
+            "html_path": "technical-chart.html",
+            "markdown_url": "",
+            "html_url": "",
+        },
+    )
+
+    publish_runtime_artifacts(
+        run_dir=run_dir,
+        metadata=metadata,
+        metadata_path=metadata_path,
+        index_path=index_path,
+        ticker="QQQ",
+        analysis_date="2026-05-25",
+        state_log=tmp_path / "missing-state-log.json",
+        fallback_state={"news_report": "# News\n\nFresh."},
+    )
+
+    persisted = json.loads(metadata_path.read_text())
+    assert persisted["state_log"] == "final_state_reports_2026-05-25.json"
+    assert any(artifact["slug"] == "news-report" for artifact in persisted["report_artifacts"])
+    assert (run_dir / "news-report.md").read_text() == "# News\n\nFresh.\n"
+    assert "used stdout state payload" in persisted["artifact_warning"]
 
 
 def test_run_finalizes_metadata_even_if_final_rendering_fails(tmp_path, monkeypatch):

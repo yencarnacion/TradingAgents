@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
@@ -69,6 +70,11 @@ def build_instrument_context(ticker: str, asset_type: str = "stock") -> str:
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _FUNCTION_RE = re.compile(r"<function=([^>]+)>\s*(.*?)\s*</function>", re.DOTALL)
 _PARAMETER_RE = re.compile(r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>", re.DOTALL)
+_INVOKE_RE = re.compile(r"<invoke\s+name=['\"]([^'\"]+)['\"]\s*>\s*(.*?)\s*</invoke>", re.DOTALL)
+_NAMED_PARAMETER_RE = re.compile(
+    r"<parameter\s+name=['\"]([^'\"]+)['\"]\s*>\s*(.*?)\s*</parameter>",
+    re.DOTALL,
+)
 
 
 def _coerce_tool_parameter(value: str):
@@ -93,11 +99,11 @@ def _coerce_tool_parameter(value: str):
 
 def extract_tool_calls_from_markup(content: str) -> list[dict]:
     """Parse DeepSeek/Qwen-style XML-ish tool-call markup into LangChain tool_calls."""
-    if not isinstance(content, str) or "<tool_call>" not in content:
+    if not isinstance(content, str):
         return []
 
     tool_calls: list[dict] = []
-    for idx, block_match in enumerate(_TOOL_CALL_BLOCK_RE.finditer(content), start=1):
+    for block_match in _TOOL_CALL_BLOCK_RE.finditer(content):
         block = block_match.group(1)
         function_match = _FUNCTION_RE.search(block)
         if not function_match:
@@ -112,7 +118,23 @@ def extract_tool_calls_from_markup(content: str) -> list[dict]:
             {
                 "name": function_name,
                 "args": args,
-                "id": f"call_{idx}",
+                "id": f"call_{len(tool_calls) + 1}",
+                "type": "tool_call",
+            }
+        )
+
+    for invoke_match in _INVOKE_RE.finditer(content):
+        function_name = invoke_match.group(1).strip()
+        body = invoke_match.group(2)
+        args = {
+            name.strip(): _coerce_tool_parameter(value)
+            for name, value in _NAMED_PARAMETER_RE.findall(body)
+        }
+        tool_calls.append(
+            {
+                "name": function_name,
+                "args": args,
+                "id": f"call_{len(tool_calls) + 1}",
                 "type": "tool_call",
             }
         )
@@ -134,12 +156,96 @@ def coerce_ai_message_tool_markup(message: AIMessage) -> AIMessage:
     return message
 
 
+def _default_start_date(end_date: str) -> str:
+    try:
+        return (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=365)).strftime("%Y-%m-%d")
+    except ValueError:
+        return end_date
+
+
+def normalize_tool_args(
+    tool_name: str,
+    args: dict[str, Any],
+    defaults: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Fill common ticker/date aliases that local models often omit in XML tool markup."""
+    defaults = defaults or {}
+    normalized = dict(args or {})
+
+    default_ticker = defaults.get("ticker") or defaults.get("symbol")
+    default_date = defaults.get("trade_date") or defaults.get("curr_date") or defaults.get("end_date")
+    default_start_date = defaults.get("start_date") or (_default_start_date(default_date) if default_date else None)
+
+    symbol_tools = {
+        "get_stock_data",
+        "get_intraday_bars",
+        "get_session_bars",
+        "get_ticker_snapshot",
+        "get_last_trade",
+        "get_nbbo_quotes",
+        "get_options_chain",
+        "get_recent_earnings_anchor",
+        "get_indicators",
+    }
+    ticker_tools = {
+        "get_news",
+        "get_fundamentals",
+        "get_balance_sheet",
+        "get_cashflow",
+        "get_income_statement",
+        "get_insider_transactions",
+    }
+
+    if tool_name in symbol_tools:
+        if "symbol" not in normalized:
+            normalized["symbol"] = normalized.get("ticker") or normalized.get("query") or default_ticker
+        normalized.pop("ticker", None)
+        normalized.pop("query", None)
+
+    if tool_name in ticker_tools:
+        if "ticker" not in normalized:
+            normalized["ticker"] = normalized.get("symbol") or normalized.get("query") or default_ticker
+        normalized.pop("symbol", None)
+        normalized.pop("query", None)
+
+    if tool_name == "get_news":
+        normalized.setdefault("start_date", defaults.get("start_date") or default_start_date)
+        normalized.setdefault("end_date", defaults.get("end_date") or default_date)
+    elif tool_name == "get_global_news":
+        normalized.setdefault("curr_date", defaults.get("curr_date") or default_date)
+        normalized.pop("ticker", None)
+        normalized.pop("symbol", None)
+        normalized.pop("query", None)
+    elif tool_name == "get_stock_data":
+        normalized.setdefault("start_date", defaults.get("start_date") or default_start_date)
+        normalized.setdefault("end_date", defaults.get("end_date") or default_date)
+    elif tool_name in {"get_intraday_bars", "get_session_bars", "get_options_chain"}:
+        normalized.setdefault("trade_date", defaults.get("trade_date") or default_date)
+    elif tool_name in {
+        "get_market_regime",
+        "get_recent_earnings_anchor",
+        "get_indicators",
+        "get_fundamentals",
+        "get_balance_sheet",
+        "get_cashflow",
+        "get_income_statement",
+    }:
+        normalized.setdefault("curr_date", defaults.get("curr_date") or default_date)
+        if tool_name == "get_market_regime":
+            normalized.pop("ticker", None)
+            normalized.pop("symbol", None)
+            normalized.pop("query", None)
+
+    return {key: value for key, value in normalized.items() if value is not None}
+
+
 def invoke_bound_tools_until_completion(
     chain,
     initial_messages,
     *,
     tools,
     max_rounds: int = 6,
+    default_tool_args: dict[str, Any] | None = None,
 ):
     """Run a tool-bound analyst chain until it returns a final prose answer."""
     tool_map = {tool.name: tool for tool in tools}
@@ -155,7 +261,7 @@ def invoke_bound_tools_until_completion(
 
         for idx, tool_call in enumerate(tool_calls, start=1):
             name = tool_call.get("name")
-            args = tool_call.get("args", {})
+            args = normalize_tool_args(name, tool_call.get("args", {}), default_tool_args) if name else {}
             tool = tool_map.get(name)
             if tool is None:
                 result = f"Tool not found: {name}"

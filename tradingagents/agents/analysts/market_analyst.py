@@ -97,6 +97,13 @@ Volume-Based Indicators:
             chain,
             state["messages"],
             tools=tools,
+            default_tool_args={
+                "ticker": state["company_of_interest"],
+                "symbol": state["company_of_interest"],
+                "trade_date": current_date,
+                "curr_date": current_date,
+                "end_date": current_date,
+            },
         )
 
         report = ""

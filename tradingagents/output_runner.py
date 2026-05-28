@@ -22,6 +22,7 @@ import pandas as pd
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.fmp import get_recent_earnings_anchor_data
 from tradingagents.dataflows.interface import get_vendor, route_to_vendor
+from tradingagents.dataflows.utils import safe_ticker_component
 from zoneinfo import ZoneInfo
 
 
@@ -31,6 +32,8 @@ DEFAULT_PORT = int(os.getenv("TICKER_AGENTS_OUTPUT_PORT", "8765"))
 NEW_YORK_TZ = ZoneInfo("America/New_York")
 FINAL_BEGIN = "=== FINAL_DECISION_MARKDOWN_BEGIN ==="
 FINAL_END = "=== FINAL_DECISION_MARKDOWN_END ==="
+STATE_BEGIN = "=== FINAL_STATE_REPORTS_JSON_BEGIN ==="
+STATE_END = "=== FINAL_STATE_REPORTS_JSON_END ==="
 STACK_EXAMPLES = {
     "grounded": "run_grounded_stack.py",
     "fmp": "run_fmp_mcp_stack.py",
@@ -130,6 +133,21 @@ def extract_final_decision(log_text: str) -> Optional[str]:
     return body or None
 
 
+def extract_state_reports(log_text: str) -> Optional[dict[str, Any]]:
+    start = log_text.rfind(STATE_BEGIN)
+    end = log_text.rfind(STATE_END)
+    if start == -1 or end == -1 or end <= start:
+        return None
+    body = log_text[start + len(STATE_BEGIN):end].strip()
+    if not body:
+        return None
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _extract_nested_text(state: dict[str, Any], *keys: str) -> Optional[str]:
     current: Any = state
     for key in keys:
@@ -180,9 +198,25 @@ def state_log_path(ticker: str, analysis_date: str) -> Path:
     )
 
 
-def load_state_log(path: Path) -> Optional[dict[str, Any]]:
+def state_log_path_from_config(ticker: str, analysis_date: str, config: dict[str, Any]) -> Path:
+    results_dir = Path(config.get("results_dir") or Path.home() / ".tradingagents" / "logs")
+    return (
+        results_dir
+        / safe_ticker_component(ticker)
+        / "TradingAgentsStrategy_logs"
+        / f"full_states_log_{analysis_date}.json"
+    )
+
+
+def load_state_log(path: Path, *, min_modified_at: Optional[float] = None) -> Optional[dict[str, Any]]:
     if not path.exists():
         return None
+    if min_modified_at is not None:
+        try:
+            if path.stat().st_mtime < min_modified_at:
+                return None
+        except OSError:
+            return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -191,6 +225,8 @@ def load_state_log(path: Path) -> Optional[dict[str, Any]]:
 
 def append_artifact_warning(metadata: dict[str, Any], message: str) -> None:
     existing = metadata.get("artifact_warning")
+    if existing and message in existing.split("; "):
+        return
     metadata["artifact_warning"] = f"{existing}; {message}" if existing else message
 
 
@@ -827,6 +863,16 @@ def write_report_artifacts(
     return artifacts
 
 
+def _report_body_count(state: Optional[dict[str, Any]]) -> int:
+    if not state:
+        return 0
+    return sum(1 for spec in REPORT_ARTIFACT_SPECS if spec.extractor(state))
+
+
+def _narrative_artifact_count(artifacts: list[dict[str, str]]) -> int:
+    return sum(1 for artifact in artifacts if artifact.get("category") != "technical")
+
+
 def write_metadata(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -841,6 +887,8 @@ def publish_runtime_artifacts(
     analysis_date: str,
     state_log: Path,
     public_base_url: Optional[str] = None,
+    fallback_state: Optional[dict[str, Any]] = None,
+    state_log_not_before: Optional[float] = None,
 ) -> None:
     artifacts: list[dict[str, str]] = []
     try:
@@ -868,11 +916,22 @@ def publish_runtime_artifacts(
     except Exception as exc:
         append_artifact_warning(metadata, f"technical chart artifact failed: {exc}")
 
-    state = load_state_log(state_log)
+    state = load_state_log(state_log, min_modified_at=state_log_not_before)
+    state_source = "state_log" if state else None
+    if _report_body_count(fallback_state) > _report_body_count(state):
+        state = fallback_state
+        state_source = "stdout_state"
+
     if state:
-        state_log_copy = run_dir / state_log.name
-        state_log_copy.write_text(state_log.read_text(encoding="utf-8"), encoding="utf-8")
-        metadata["state_log"] = state_log_copy.name
+        if state_source == "state_log":
+            state_log_copy = run_dir / state_log.name
+            state_log_copy.write_text(state_log.read_text(encoding="utf-8"), encoding="utf-8")
+            metadata["state_log"] = state_log_copy.name
+        else:
+            state_log_copy = run_dir / f"final_state_reports_{analysis_date}.json"
+            state_log_copy.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            metadata["state_log"] = state_log_copy.name
+            append_artifact_warning(metadata, "used stdout state payload because state log reports were unavailable or incomplete")
         artifacts = write_report_artifacts(
             run_dir,
             ticker,
@@ -1007,14 +1066,14 @@ def render_live_html(title: str) -> str:
 
     function renderInlineMarkdown(md) {{
       let body = escapeHtml(md.trim());
-      body = body.replace(/^###\s+(.*)$/gm, '<h3>$1</h3>');
-      body = body.replace(/^##\s+(.*)$/gm, '<h2>$1</h2>');
-      body = body.replace(/^#\s+(.*)$/gm, '<h1>$1</h1>');
-      body = body.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-      body = body.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      body = body.replace(/^###\\s+(.*)$/gm, '<h3>$1</h3>');
+      body = body.replace(/^##\\s+(.*)$/gm, '<h2>$1</h2>');
+      body = body.replace(/^#\\s+(.*)$/gm, '<h1>$1</h1>');
+      body = body.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+      body = body.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
       body = body.replace(/`([^`]+)`/g, '<code>$1</code>');
       body = body.replace(/\n\n/g, '</p><p>');
-      body = body.replace(/\n-\s+/g, '\n• ');
+      body = body.replace(/\n-\\s+/g, '\n• ');
       return '<div class="markdown"><p>' + body + '</p></div>';
     }}
 
@@ -1038,8 +1097,11 @@ def render_live_html(title: str) -> str:
 
     function parseStructuredEntries(logText) {{
       const entries = [];
-      const finalMatches = [...logText.matchAll(/=== FINAL_DECISION_MARKDOWN_BEGIN ===([\s\S]*?)=== FINAL_DECISION_MARKDOWN_END ===/g)];
-      const cleaned = logText.replace(/=== FINAL_DECISION_MARKDOWN_BEGIN ===[\s\S]*?=== FINAL_DECISION_MARKDOWN_END ===/g, '').trim();
+      const finalMatches = [...logText.matchAll(/=== FINAL_DECISION_MARKDOWN_BEGIN ===([\\s\\S]*?)=== FINAL_DECISION_MARKDOWN_END ===/g)];
+      const cleaned = logText
+        .replace(/=== FINAL_DECISION_MARKDOWN_BEGIN ===[\\s\\S]*?=== FINAL_DECISION_MARKDOWN_END ===/g, '')
+        .replace(/=== FINAL_STATE_REPORTS_JSON_BEGIN ===[\\s\\S]*?=== FINAL_STATE_REPORTS_JSON_END ===/g, '')
+        .trim();
       const humanHeader = '================================ Human Message =================================';
       const aiHeader = '================================== Ai Message ==================================';
       const lines = cleaned.split('\n');
@@ -1076,7 +1138,7 @@ def render_live_html(title: str) -> str:
           expanded.push(entry);
           continue;
         }}
-        const toolRegex = /<tool_call>[\s\S]*?<\/tool_call>/g;
+        const toolRegex = /<tool_call>[\\s\\S]*?<\\/tool_call>/g;
         const toolMatches = [...entry.body.matchAll(toolRegex)];
         const plain = entry.body.replace(toolRegex, '').trim();
         if (plain) expanded.push({{ kind:'ai', label:'AI output', body: plain }});
@@ -1218,6 +1280,7 @@ def render_index_html(metadata: dict) -> str:
             ("finished_at", format_timestamp_for_display(metadata.get("finished_at"))),
             ("duration", metadata.get("duration_hms") or "—"),
             ("exit_code", metadata.get("exit_code")),
+            ("artifact_warning", metadata.get("artifact_warning") or "—"),
             ("command", metadata.get("command")),
         ]
     )
@@ -1418,6 +1481,11 @@ def run(argv: Optional[list[str]] = None) -> int:
     env = os.environ.copy()
     env.setdefault("OPENAI_API_KEY", "dummy")
     state_log = state_log_path(ticker, analysis_date)
+    if not state_log.exists():
+        try:
+            state_log = state_log_path_from_config(ticker, analysis_date, _build_stack_config(args.stack))
+        except Exception as exc:
+            append_artifact_warning(metadata, f"could not resolve stack state log path: {exc}")
     last_runtime_publish_at = 0.0
     runtime_publish_warning: Optional[str] = None
 
@@ -1436,6 +1504,8 @@ def run(argv: Optional[list[str]] = None) -> int:
                 analysis_date=analysis_date,
                 state_log=state_log,
                 public_base_url=f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}",
+                fallback_state=extract_state_reports("".join(combined_output)),
+                state_log_not_before=started_at.timestamp() - 1.0,
             )
         except Exception as exc:
             warning = f"runtime report publish failed: {exc}"
@@ -1498,6 +1568,7 @@ def run(argv: Optional[list[str]] = None) -> int:
 
     full_text = "".join(combined_output)
     final_md = extract_final_decision(full_text)
+    final_state_reports = extract_state_reports(full_text)
     maybe_publish_runtime_artifacts(force=True)
     try:
         if final_md:
@@ -1510,6 +1581,23 @@ def run(argv: Optional[list[str]] = None) -> int:
         else:
             metadata["has_final_markdown"] = False
 
+        if (
+            final_state_reports
+            and _narrative_artifact_count(metadata.get("report_artifacts", []))
+            < _report_body_count(final_state_reports)
+        ):
+            publish_runtime_artifacts(
+                run_dir=paths.run_dir,
+                metadata=metadata,
+                metadata_path=paths.metadata_json,
+                index_path=paths.index_html,
+                ticker=ticker,
+                analysis_date=analysis_date,
+                state_log=state_log,
+                public_base_url=f"http://{DEFAULT_PUBLIC_HOST}:{args.port}/{slug}",
+                fallback_state=final_state_reports,
+                state_log_not_before=started_at.timestamp() - 1.0,
+            )
         maybe_publish_runtime_artifacts(force=True)
     except Exception as exc:
         metadata["has_final_markdown"] = paths.final_md.exists()
@@ -1517,6 +1605,8 @@ def run(argv: Optional[list[str]] = None) -> int:
         if metadata["status"] == "completed":
             metadata["status"] = "completed_with_warnings"
     finally:
+        if metadata.get("artifact_warning") and metadata["status"] == "completed":
+            metadata["status"] = "completed_with_warnings"
         with paths.console_txt.open("a", encoding="utf-8") as out_handle:
             out_handle.write(f"\n\n# Run summary\n")
             out_handle.write(f"status: {metadata['status']}\n")

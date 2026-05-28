@@ -89,6 +89,48 @@ def test_news_analyst_executes_markup_tool_call_and_returns_final_report(monkeyp
     assert isinstance(llm.invocations[1][-1], ToolMessage)
 
 
+def test_news_analyst_executes_qwen_invoke_markup(monkeypatch):
+    module = importlib.import_module("tradingagents.agents.analysts.news_analyst")
+    monkeypatch.setattr(module, "ChatPromptTemplate", _FakeChatPromptTemplate)
+
+    news_tool = _FakeTool("get_news", "headline payload")
+    global_news_tool = _FakeTool("get_global_news", "macro payload")
+    monkeypatch.setattr(module, "get_news", news_tool)
+    monkeypatch.setattr(module, "get_global_news", global_news_tool)
+
+    llm = _SequenceLLM(
+        [
+            AIMessage(
+                content=(
+                    "<tool_code>\n"
+                    "<function_calls>\n"
+                    "<invoke name='get_global_news'>\n"
+                    "<parameter name='curr_date'>2026-05-26</parameter>\n"
+                    "<parameter name='look_back_days'>7</parameter>\n"
+                    "</invoke>\n"
+                    "<invoke name='get_news'>\n"
+                    "<parameter name='query'>QQQ</parameter>\n"
+                    "<parameter name='start_date'>2026-05-19</parameter>\n"
+                    "<parameter name='end_date'>2026-05-26</parameter>\n"
+                    "</invoke>\n"
+                    "</function_calls>\n"
+                    "</tool_code>"
+                )
+            ),
+            AIMessage(content="## News Report\n\nMacro tone improved after catalyst review."),
+        ]
+    )
+
+    node = module.create_news_analyst(llm)
+    output = node(_state())
+
+    assert output["news_report"] == "## News Report\n\nMacro tone improved after catalyst review."
+    assert global_news_tool.calls == [{"curr_date": "2026-05-26", "look_back_days": 7}]
+    assert news_tool.calls == [{"ticker": "QQQ", "start_date": "2026-05-19", "end_date": "2026-05-26"}]
+    assert isinstance(llm.invocations[1][-2], ToolMessage)
+    assert isinstance(llm.invocations[1][-1], ToolMessage)
+
+
 def test_market_analyst_keeps_final_written_report(monkeypatch):
     module = importlib.import_module("tradingagents.agents.analysts.market_analyst")
     monkeypatch.setattr(module, "ChatPromptTemplate", _FakeChatPromptTemplate)
@@ -130,6 +172,57 @@ def test_market_analyst_executes_recent_earnings_anchor_tool(monkeypatch):
     assert output["market_report"] == "## Market Report\n\nPrice is holding above post-earnings AVWAP."
     assert earnings_tool.calls == [{"symbol": "QQQ", "curr_date": "2026-05-26"}]
     assert isinstance(llm.invocations[1][-1], ToolMessage)
+
+
+def test_market_analyst_executes_qwen_invoke_markup_with_defaults(monkeypatch):
+    module = importlib.import_module("tradingagents.agents.analysts.market_analyst")
+    monkeypatch.setattr(module, "ChatPromptTemplate", _FakeChatPromptTemplate)
+
+    market_regime_tool = _FakeTool("get_market_regime", "regime payload")
+    snapshot_tool = _FakeTool("get_ticker_snapshot", "snapshot payload")
+    intraday_tool = _FakeTool("get_intraday_bars", "intraday payload")
+    session_tool = _FakeTool("get_session_bars", "session payload")
+    stock_data_tool = _FakeTool("get_stock_data", "stock data payload")
+    options_tool = _FakeTool("get_options_chain", "options payload")
+
+    monkeypatch.setattr(module, "get_market_regime", market_regime_tool)
+    monkeypatch.setattr(module, "get_ticker_snapshot", snapshot_tool)
+    monkeypatch.setattr(module, "get_intraday_bars", intraday_tool)
+    monkeypatch.setattr(module, "get_session_bars", session_tool)
+    monkeypatch.setattr(module, "get_stock_data", stock_data_tool)
+    monkeypatch.setattr(module, "get_options_chain", options_tool)
+
+    llm = _SequenceLLM(
+        [
+            AIMessage(
+                content=(
+                    "<tool_code>\n"
+                    "<function_calls>\n"
+                    "<invoke name='get_market_regime'><parameter name='ticker'>QQQ</parameter></invoke>\n"
+                    "<invoke name='get_ticker_snapshot'><parameter name='ticker'>QQQ</parameter></invoke>\n"
+                    "<invoke name='get_intraday_bars'><parameter name='ticker'>QQQ</parameter></invoke>\n"
+                    "<invoke name='get_session_bars'><parameter name='ticker'>QQQ</parameter></invoke>\n"
+                    "<invoke name='get_stock_data'><parameter name='ticker'>QQQ</parameter></invoke>\n"
+                    "<invoke name='get_options_chain'><parameter name='ticker'>QQQ</parameter></invoke>\n"
+                    "</function_calls>\n"
+                    "</tool_code>"
+                )
+            ),
+            AIMessage(content="## Market Report\n\nSpot is near 750 and tape is constructive."),
+        ]
+    )
+
+    node = module.create_market_analyst(llm)
+    output = node(_state())
+
+    assert output["market_report"] == "## Market Report\n\nSpot is near 750 and tape is constructive."
+    assert market_regime_tool.calls == [{"curr_date": "2026-05-26"}]
+    assert snapshot_tool.calls == [{"symbol": "QQQ"}]
+    assert intraday_tool.calls == [{"symbol": "QQQ", "trade_date": "2026-05-26"}]
+    assert session_tool.calls == [{"symbol": "QQQ", "trade_date": "2026-05-26"}]
+    assert stock_data_tool.calls == [{"symbol": "QQQ", "start_date": "2025-05-26", "end_date": "2026-05-26"}]
+    assert options_tool.calls == [{"symbol": "QQQ", "trade_date": "2026-05-26"}]
+    assert all(isinstance(message, ToolMessage) for message in llm.invocations[1][-6:])
 
 
 def test_fundamentals_analyst_executes_tool_with_numeric_arguments(monkeypatch):

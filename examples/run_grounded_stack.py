@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from copy import deepcopy
 from datetime import date
@@ -11,7 +12,22 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 FINAL_BEGIN = "=== FINAL_DECISION_MARKDOWN_BEGIN ==="
 FINAL_END = "=== FINAL_DECISION_MARKDOWN_END ==="
+STATE_BEGIN = "=== FINAL_STATE_REPORTS_JSON_BEGIN ==="
+STATE_END = "=== FINAL_STATE_REPORTS_JSON_END ==="
 DEFAULT_TICKER = "SPY"
+
+
+def report_payload(final_state: dict) -> dict:
+    return {
+        "market_report": final_state.get("market_report", ""),
+        "sentiment_report": final_state.get("sentiment_report", ""),
+        "news_report": final_state.get("news_report", ""),
+        "fundamentals_report": final_state.get("fundamentals_report", ""),
+        "investment_debate_state": final_state.get("investment_debate_state", {}),
+        "investment_plan": final_state.get("investment_plan", ""),
+        "trader_investment_decision": final_state.get("trader_investment_plan", ""),
+        "risk_debate_state": final_state.get("risk_debate_state", {}),
+    }
 
 
 def resolve_inputs(ticker: str | None = None, analysis_date: str | None = None) -> tuple[str, str]:
@@ -58,7 +74,10 @@ def main():
     ticker, analysis_date = resolve_inputs(args.ticker, args.analysis_date)
     config = build_config()
     graph = TradingAgentsGraph(debug=True, config=config)
-    _, decision = graph.propagate(ticker, analysis_date)
+    final_state, decision = graph.propagate(ticker, analysis_date)
+    print(STATE_BEGIN)
+    print(json.dumps(report_payload(final_state), ensure_ascii=False, default=str))
+    print(STATE_END)
     print(FINAL_BEGIN)
     print(decision)
     print(FINAL_END)
