@@ -204,10 +204,40 @@ def extract_tool_calls_from_markup(content: str) -> list[dict]:
         return []
 
     tool_calls: list[dict] = []
+    parsed_function_spans: list[tuple[int, int]] = []
     for block_match in _TOOL_CALL_BLOCK_RE.finditer(content):
         block = block_match.group(1)
         function_match = _FUNCTION_RE.search(block)
         if not function_match:
+            continue
+        parsed_function_spans.append(
+            (
+                block_match.start(1) + function_match.start(),
+                block_match.start(1) + function_match.end(),
+            )
+        )
+        function_name = function_match.group(1).strip()
+        body = function_match.group(2)
+        args = {
+            name.strip(): _coerce_tool_parameter(value)
+            for name, value in _PARAMETER_RE.findall(body)
+        }
+        tool_calls.append(
+            {
+                "name": function_name,
+                "args": args,
+                "id": f"call_{len(tool_calls) + 1}",
+                "type": "tool_call",
+            }
+        )
+
+    # Some local models occasionally omit the closing </tool_call> wrapper while
+    # still emitting a complete <function=...>...</function> block.
+    for function_match in _FUNCTION_RE.finditer(content):
+        if any(
+            start <= function_match.start() and function_match.end() <= end
+            for start, end in parsed_function_spans
+        ):
             continue
         function_name = function_match.group(1).strip()
         body = function_match.group(2)

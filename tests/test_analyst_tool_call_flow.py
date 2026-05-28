@@ -174,6 +174,34 @@ def test_market_analyst_executes_recent_earnings_anchor_tool(monkeypatch):
     assert isinstance(llm.invocations[1][-1], ToolMessage)
 
 
+def test_market_analyst_executes_malformed_tool_call_without_closing_wrapper(monkeypatch):
+    module = importlib.import_module("tradingagents.agents.analysts.market_analyst")
+    monkeypatch.setattr(module, "ChatPromptTemplate", _FakeChatPromptTemplate)
+
+    options_tool = _FakeTool("get_options_chain", "options payload")
+    monkeypatch.setattr(module, "get_options_chain", options_tool)
+
+    llm = _SequenceLLM(
+        [
+            AIMessage(
+                content=(
+                    "<tool_call>\n"
+                    "<function=get_options_chain>\n"
+                    "</function>"
+                )
+            ),
+            AIMessage(content="## Market Report\n\nOptions context was reviewed."),
+        ]
+    )
+
+    node = module.create_market_analyst(llm)
+    output = node(_state())
+
+    assert output["market_report"] == "## Market Report\n\nOptions context was reviewed."
+    assert options_tool.calls == [{"symbol": "QQQ", "trade_date": "2026-05-26"}]
+    assert isinstance(llm.invocations[1][-1], ToolMessage)
+
+
 def test_market_analyst_executes_qwen_invoke_markup_with_defaults(monkeypatch):
     module = importlib.import_module("tradingagents.agents.analysts.market_analyst")
     monkeypatch.setattr(module, "ChatPromptTemplate", _FakeChatPromptTemplate)
