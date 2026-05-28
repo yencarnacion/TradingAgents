@@ -1,5 +1,6 @@
 """Regression tests for OpenAI-compatible local Qwen tool-calling quirks."""
 
+from pydantic import BaseModel
 from pydantic import SecretStr
 
 from tradingagents.llm_clients import capabilities as caps_mod
@@ -68,3 +69,25 @@ def test_bind_tools_falls_back_to_plain_bind_for_local_qwen(monkeypatch):
 
     assert result == "bound"
     assert captured["kwargs"] == {}
+
+
+def test_structured_output_keeps_schema_tool_for_local_qwen():
+    class Pick(BaseModel):
+        action: str
+
+    llm = mod.NormalizedChatOpenAI(
+        model="Qwen/Qwen3.6-27B-FP8",
+        api_key=SecretStr("x"),
+        base_url="http://10.17.17.99:8005/v1",
+    )
+
+    bound = llm.with_structured_output(Pick)
+    first = bound.steps[0] if hasattr(bound, "steps") else bound
+    kwargs = getattr(first, "kwargs", {})
+
+    assert "tool_choice" not in kwargs
+    assert "strict" not in kwargs
+    assert any(
+        tool.get("function", {}).get("name") == "Pick"
+        for tool in kwargs.get("tools", [])
+    )

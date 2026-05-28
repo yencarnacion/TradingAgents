@@ -225,6 +225,128 @@ def test_market_analyst_executes_qwen_invoke_markup_with_defaults(monkeypatch):
     assert all(isinstance(message, ToolMessage) for message in llm.invocations[1][-6:])
 
 
+def test_market_analyst_executes_fenced_json_tool_plan(monkeypatch):
+    module = importlib.import_module("tradingagents.agents.analysts.market_analyst")
+    monkeypatch.setattr(module, "ChatPromptTemplate", _FakeChatPromptTemplate)
+
+    market_regime_tool = _FakeTool("get_market_regime", "regime payload")
+    snapshot_tool = _FakeTool("get_ticker_snapshot", "snapshot payload")
+    intraday_tool = _FakeTool("get_intraday_bars", "intraday payload")
+    session_tool = _FakeTool("get_session_bars", "session payload")
+    options_tool = _FakeTool("get_options_chain", "options payload")
+    last_trade_tool = _FakeTool("get_last_trade", "last trade payload")
+    quote_tool = _FakeTool("get_nbbo_quotes", "quote payload")
+    stock_data_tool = _FakeTool("get_stock_data", "stock data payload")
+
+    monkeypatch.setattr(module, "get_market_regime", market_regime_tool)
+    monkeypatch.setattr(module, "get_ticker_snapshot", snapshot_tool)
+    monkeypatch.setattr(module, "get_intraday_bars", intraday_tool)
+    monkeypatch.setattr(module, "get_session_bars", session_tool)
+    monkeypatch.setattr(module, "get_options_chain", options_tool)
+    monkeypatch.setattr(module, "get_last_trade", last_trade_tool)
+    monkeypatch.setattr(module, "get_nbbo_quotes", quote_tool)
+    monkeypatch.setattr(module, "get_stock_data", stock_data_tool)
+
+    llm = _SequenceLLM(
+        [
+            AIMessage(
+                content=(
+                    "I will pull the market data.\n\n"
+                    "```json\n"
+                    "[\n"
+                    '  {"tool": "get_market_regime", "args": {"ticker": "QQQ"}},\n'
+                    '  {"tool": "get_ticker_snapshot", "args": {"ticker": "QQQ"}},\n'
+                    '  {"tool": "get_intraday_bars", "args": {"ticker": "QQQ"}},\n'
+                    '  {"tool": "get_session_bars", "args": {"ticker": "QQQ"}},\n'
+                    '  {"tool": "get_options_chain", "args": {"ticker": "QQQ"}},\n'
+                    '  {"tool": "get_last_trade", "args": {"ticker": "QQQ"}},\n'
+                    '  {"tool": "get_nbbo_quotes", "args": {"ticker": "QQQ"}},\n'
+                    '  {"tool": "get_stock_data", "args": {"ticker": "QQQ"}}\n'
+                    "]\n"
+                    "```"
+                )
+            ),
+            AIMessage(content="## Market Report\n\nTape is constructive after tool review."),
+        ]
+    )
+
+    node = module.create_market_analyst(llm)
+    output = node(_state())
+
+    assert output["market_report"] == "## Market Report\n\nTape is constructive after tool review."
+    assert market_regime_tool.calls == [{"curr_date": "2026-05-26"}]
+    assert snapshot_tool.calls == [{"symbol": "QQQ"}]
+    assert intraday_tool.calls == [{"symbol": "QQQ", "trade_date": "2026-05-26"}]
+    assert session_tool.calls == [{"symbol": "QQQ", "trade_date": "2026-05-26"}]
+    assert options_tool.calls == [{"symbol": "QQQ", "trade_date": "2026-05-26"}]
+    assert last_trade_tool.calls == [{"symbol": "QQQ"}]
+    assert quote_tool.calls == [{"symbol": "QQQ"}]
+    assert stock_data_tool.calls == [{"symbol": "QQQ", "start_date": "2025-05-26", "end_date": "2026-05-26"}]
+    assert all(isinstance(message, ToolMessage) for message in llm.invocations[1][-8:])
+
+
+def test_news_analyst_executes_fenced_simple_call(monkeypatch):
+    module = importlib.import_module("tradingagents.agents.analysts.news_analyst")
+    monkeypatch.setattr(module, "ChatPromptTemplate", _FakeChatPromptTemplate)
+
+    news_tool = _FakeTool("get_news", "headline payload")
+    global_news_tool = _FakeTool("get_global_news", "macro payload")
+    monkeypatch.setattr(module, "get_news", news_tool)
+    monkeypatch.setattr(module, "get_global_news", global_news_tool)
+
+    llm = _SequenceLLM(
+        [
+            AIMessage(
+                content=(
+                    "Let me pull targeted news.\n\n"
+                    '```json\ncall_get_news(query="QQQ", start_date="2026-05-19", end_date="2026-05-26")\n```'
+                )
+            ),
+            AIMessage(content="## News Report\n\nMacro tone improved after catalyst review."),
+        ]
+    )
+
+    node = module.create_news_analyst(llm)
+    output = node(_state())
+
+    assert output["news_report"] == "## News Report\n\nMacro tone improved after catalyst review."
+    assert news_tool.calls == [{"ticker": "QQQ", "start_date": "2026-05-19", "end_date": "2026-05-26"}]
+    assert global_news_tool.calls == []
+
+
+def test_fundamentals_analyst_executes_fenced_action_json(monkeypatch):
+    module = importlib.import_module("tradingagents.agents.analysts.fundamentals_analyst")
+    monkeypatch.setattr(module, "ChatPromptTemplate", _FakeChatPromptTemplate)
+
+    fundamentals_tool = _FakeTool("get_fundamentals", "fundamentals payload")
+    monkeypatch.setattr(module, "get_fundamentals", fundamentals_tool)
+
+    llm = _SequenceLLM(
+        [
+            AIMessage(
+                content=(
+                    "Let me gather comprehensive fundamental data.\n\n"
+                    "```json\n"
+                    "{\n"
+                    '  "action": {\n'
+                    '    "function": "get_fundamentals",\n'
+                    '    "parameters": {"instrument": "QQQ"}\n'
+                    "  }\n"
+                    "}\n"
+                    "```"
+                )
+            ),
+            AIMessage(content="## Fundamentals Report\n\nETF fundamentals reviewed."),
+        ]
+    )
+
+    node = module.create_fundamentals_analyst(llm)
+    output = node(_state())
+
+    assert output["fundamentals_report"] == "## Fundamentals Report\n\nETF fundamentals reviewed."
+    assert fundamentals_tool.calls == [{"ticker": "QQQ", "curr_date": "2026-05-26"}]
+
+
 def test_fundamentals_analyst_executes_tool_with_numeric_arguments(monkeypatch):
     module = importlib.import_module("tradingagents.agents.analysts.fundamentals_analyst")
     monkeypatch.setattr(module, "ChatPromptTemplate", _FakeChatPromptTemplate)

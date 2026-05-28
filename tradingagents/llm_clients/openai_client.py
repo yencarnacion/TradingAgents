@@ -32,17 +32,35 @@ class NormalizedChatOpenAI(ChatOpenAI):
     def invoke(self, input, config=None, **kwargs):
         return normalize_content(super().invoke(input, config, **kwargs))
 
-    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+    def bind_tools(
+        self,
+        tools,
+        *,
+        tool_choice=None,
+        strict=None,
+        parallel_tool_calls=None,
+        response_format=None,
+        **kwargs,
+    ):
         caps = get_capabilities(self.model_name)
         # Some OpenAI-compatible backends accept neither LangChain's
         # tool_choice payload nor the presence of a tools array unless extra
-        # server-side flags are enabled. For those models we fall back to the
-        # prompt-driven XML-ish tool-call protocol parsed by
-        # coerce_ai_message_tool_markup(), so the agent can still call tools
-        # without native API tool binding.
+        # server-side flags are enabled. For ordinary agent tools, fall back to
+        # the prompt-driven protocol parsed by coerce_ai_message_tool_markup().
+        # For structured output, keep the schema bound as a bare tools array
+        # and suppress only tool_choice.
         if not caps.supports_tool_choice:
-            return super().bind(**kwargs)
-        return super().bind_tools(tools, tool_choice=tool_choice, **kwargs)
+            tool_choice = None
+            if "ls_structured_output_format" not in kwargs and response_format is None:
+                return super().bind(**kwargs)
+        return super().bind_tools(
+            tools,
+            tool_choice=tool_choice,
+            strict=strict,
+            parallel_tool_calls=parallel_tool_calls,
+            response_format=response_format,
+            **kwargs,
+        )
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
         caps = get_capabilities(self.model_name)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import json
 import re
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -75,6 +77,14 @@ _NAMED_PARAMETER_RE = re.compile(
     r"<parameter\s+name=['\"]([^'\"]+)['\"]\s*>\s*(.*?)\s*</parameter>",
     re.DOTALL,
 )
+_FENCED_CODE_RE = re.compile(r"```(?:[a-zA-Z0-9_-]+)?\s*(.*?)\s*```", re.DOTALL)
+_SIMPLE_CALL_RE = re.compile(
+    r"^\s*(?:call_)?([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$",
+    re.DOTALL,
+)
+_CALL_ARG_RE = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^,]+)"
+)
 
 
 def _coerce_tool_parameter(value: str):
@@ -95,6 +105,97 @@ def _coerce_tool_parameter(value: str):
         except ValueError:
             return text
     return text
+
+
+def _tool_call_from_mapping(payload: dict[str, Any], call_id: int) -> dict[str, Any] | None:
+    action = payload.get("action")
+    if isinstance(action, dict):
+        action_call = _tool_call_from_mapping(action, call_id)
+        if action_call is not None:
+            return action_call
+
+    function = payload.get("function")
+    if isinstance(function, dict):
+        function_name = function.get("name")
+        raw_args = function.get("arguments") or payload.get("args") or payload.get("parameters") or {}
+        if isinstance(raw_args, str):
+            try:
+                raw_args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                raw_args = {}
+    else:
+        function_name = payload.get("tool") or payload.get("name") or function
+        raw_args = payload.get("args") or payload.get("parameters") or {}
+
+    if not isinstance(function_name, str) or not function_name.strip():
+        return None
+    if not isinstance(raw_args, dict):
+        raw_args = {}
+
+    return {
+        "name": function_name.strip().removeprefix("call_"),
+        "args": raw_args,
+        "id": f"call_{call_id}",
+        "type": "tool_call",
+    }
+
+
+def _extract_json_tool_calls(content: str, start_index: int) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    candidates = [match.group(1).strip() for match in _FENCED_CODE_RE.finditer(content)]
+    stripped = content.strip()
+    if stripped.startswith(("{", "[")):
+        candidates.append(stripped)
+
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+        items = payload if isinstance(payload, list) else [payload]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            tool_call = _tool_call_from_mapping(item, start_index + len(calls))
+            if tool_call is not None:
+                calls.append(tool_call)
+
+    return calls
+
+
+def _extract_simple_call_tool_calls(content: str, start_index: int) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    candidates = [match.group(1).strip() for match in _FENCED_CODE_RE.finditer(content)]
+    stripped = content.strip()
+    if _SIMPLE_CALL_RE.match(stripped):
+        candidates.append(stripped)
+
+    for candidate in candidates:
+        call_match = _SIMPLE_CALL_RE.match(candidate)
+        if not call_match:
+            continue
+
+        function_name = call_match.group(1).strip().removeprefix("call_")
+        args_text = call_match.group(2)
+        args: dict[str, Any] = {}
+        for key, raw_value in _CALL_ARG_RE.findall(args_text):
+            value = raw_value.strip()
+            try:
+                args[key] = ast.literal_eval(value)
+            except (SyntaxError, ValueError):
+                args[key] = _coerce_tool_parameter(value)
+
+        calls.append(
+            {
+                "name": function_name,
+                "args": args,
+                "id": f"call_{start_index + len(calls)}",
+                "type": "tool_call",
+            }
+        )
+
+    return calls
 
 
 def extract_tool_calls_from_markup(content: str) -> list[dict]:
@@ -138,6 +239,8 @@ def extract_tool_calls_from_markup(content: str) -> list[dict]:
                 "type": "tool_call",
             }
         )
+    tool_calls.extend(_extract_json_tool_calls(content, len(tool_calls) + 1))
+    tool_calls.extend(_extract_simple_call_tool_calls(content, len(tool_calls) + 1))
     return tool_calls
 
 
@@ -198,15 +301,27 @@ def normalize_tool_args(
 
     if tool_name in symbol_tools:
         if "symbol" not in normalized:
-            normalized["symbol"] = normalized.get("ticker") or normalized.get("query") or default_ticker
+            normalized["symbol"] = (
+                normalized.get("ticker")
+                or normalized.get("query")
+                or normalized.get("instrument")
+                or default_ticker
+            )
         normalized.pop("ticker", None)
         normalized.pop("query", None)
+        normalized.pop("instrument", None)
 
     if tool_name in ticker_tools:
         if "ticker" not in normalized:
-            normalized["ticker"] = normalized.get("symbol") or normalized.get("query") or default_ticker
+            normalized["ticker"] = (
+                normalized.get("symbol")
+                or normalized.get("query")
+                or normalized.get("instrument")
+                or default_ticker
+            )
         normalized.pop("symbol", None)
         normalized.pop("query", None)
+        normalized.pop("instrument", None)
 
     if tool_name == "get_news":
         normalized.setdefault("start_date", defaults.get("start_date") or default_start_date)
