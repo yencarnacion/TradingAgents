@@ -15,6 +15,14 @@ FINAL_END = "=== FINAL_DECISION_MARKDOWN_END ==="
 STATE_BEGIN = "=== FINAL_STATE_REPORTS_JSON_BEGIN ==="
 STATE_END = "=== FINAL_STATE_REPORTS_JSON_END ==="
 DEFAULT_TICKER = "SPY"
+DEFAULT_QWEN_MODEL = "Qwen/Qwen3.6-27B-FP8"
+DEFAULT_QWEN_BACKEND_URL = "http://10.17.17.99:8005/v1"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+
+
+def _env_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    return value if value else None
 
 
 def report_payload(final_state: dict) -> dict:
@@ -42,13 +50,19 @@ def build_config():
     # - Massive MCP on 10.17.17.90:8083 for intraday / options / tape data
     # - FMP MCP on 10.17.17.90:8086 for fundamentals / news / insiders / macro context
     # - news/Grok MCP on 10.17.17.90:9081 for X sentiment fallback when no local xAI key is present
-    os.environ.setdefault("OPENAI_API_KEY", "dummy")
-
     config = deepcopy(DEFAULT_CONFIG)
-    config["llm_provider"] = "openai"
-    config["backend_url"] = "http://10.17.17.99:8005/v1"
-    config["deep_think_llm"] = "Qwen/Qwen3.6-27B-FP8"
-    config["quick_think_llm"] = "Qwen/Qwen3.6-27B-FP8"
+
+    provider = _env_value("TRADINGAGENTS_LLM_PROVIDER") or "openai"
+    default_model = DEFAULT_GEMINI_MODEL if provider == "google" else DEFAULT_QWEN_MODEL
+    default_backend_url = DEFAULT_QWEN_BACKEND_URL if provider == "openai" else None
+
+    if provider == "openai":
+        os.environ.setdefault("OPENAI_API_KEY", "dummy")
+
+    config["llm_provider"] = provider
+    config["backend_url"] = _env_value("TRADINGAGENTS_LLM_BACKEND_URL") or default_backend_url
+    config["deep_think_llm"] = _env_value("TRADINGAGENTS_DEEP_THINK_LLM") or default_model
+    config["quick_think_llm"] = _env_value("TRADINGAGENTS_QUICK_THINK_LLM") or default_model
     config["market_data_mcp_url"] = "https://10.17.17.90:8083/mcp"
     config["fmp_mcp_url"] = "http://10.17.17.90:8086/mcp"
     config["news_mcp_url"] = "http://10.17.17.90:9081/mcp"

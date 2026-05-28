@@ -20,3 +20,17 @@ def test_build_config_uses_fmp_mcp_stack():
     assert config["tool_vendors"]["get_global_news"] == "grok,fmp"
     assert config["tool_vendors"]["get_insider_transactions"] == "fmp"
     assert config["data_vendors"]["technical_indicators"] == "massive"
+
+
+def test_build_config_honors_gemini_llm_env(monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_LLM_PROVIDER", "google")
+    monkeypatch.setenv("TRADINGAGENTS_DEEP_THINK_LLM", "gemini-3.5-flash")
+    monkeypatch.setenv("TRADINGAGENTS_QUICK_THINK_LLM", "gemini-3.5-flash")
+    monkeypatch.setenv("TRADINGAGENTS_LLM_BACKEND_URL", "")
+
+    config = build_config()
+
+    assert config["llm_provider"] == "google"
+    assert config["backend_url"] is None
+    assert config["deep_think_llm"] == "gemini-3.5-flash"
+    assert config["quick_think_llm"] == "gemini-3.5-flash"
