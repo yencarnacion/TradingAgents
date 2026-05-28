@@ -23,6 +23,8 @@ _SESSION_WINDOWS = {
     "afterhours": ((16, 1), (19, 59)),
 }
 _DEFAULT_SECTOR_ETFS = ("XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU")
+_LONGEST_ROLLING_INDICATOR_DAYS = 200
+_INDICATOR_WARMUP_BUFFER_DAYS = 30
 _INDICATOR_DESCRIPTIONS = {
     "close_50_sma": (
         "50 SMA: A medium-term trend indicator. "
@@ -307,7 +309,11 @@ def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
 
 def _indicator_frame(symbol: str, curr_date: str, look_back_days: int) -> pd.DataFrame:
     end_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-    warmup_days = max(260, look_back_days + 220)
+    min_calendar_days = (
+        int((look_back_days + _LONGEST_ROLLING_INDICATOR_DAYS) * 7 / 5)
+        + _INDICATOR_WARMUP_BUFFER_DAYS
+    )
+    warmup_days = max(365, min_calendar_days)
     start_date = (end_dt - timedelta(days=warmup_days)).strftime("%Y-%m-%d")
     payload = _request(
         f"/v2/aggs/ticker/{symbol.upper()}/range/1/day/{start_date}/{curr_date}",

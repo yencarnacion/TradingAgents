@@ -229,3 +229,34 @@ class TestMassiveMarketContextDataflows:
         assert "## close_200_sma values from 2025-09-14 to 2025-09-17:" in result
         assert "2025-09-17:" in result
         assert "200 SMA: A long-term trend benchmark." in result
+
+    def test_get_indicators_fetches_enough_calendar_history_for_200_day_sma(self):
+        def fake_request(path, params=None):
+            assert path == "/v2/aggs/ticker/AAPL/range/1/day/2024-09-17/2025-09-17"
+            rows = []
+            current = datetime(2024, 9, 17, 17, tzinfo=timezone.utc)
+            end = datetime(2025, 9, 17, 17, tzinfo=timezone.utc)
+            offset = 0
+            while current <= end:
+                if current.weekday() < 5:
+                    price = 100 + offset
+                    rows.append(
+                        {
+                            "t": int(current.timestamp() * 1000),
+                            "o": float(price),
+                            "h": float(price + 2),
+                            "l": float(price - 2),
+                            "c": float(price + 1),
+                            "v": float(1000 + offset * 10),
+                            "vw": float(price + 0.5),
+                        }
+                    )
+                    offset += 1
+                current += timedelta(days=1)
+            return {"results": rows}
+
+        with patch.object(massive, "_request", side_effect=fake_request):
+            result = massive.get_indicators("AAPL", "close_200_sma", "2025-09-17", 3)
+
+        assert "2025-09-17: N/A" not in result
+        assert "2025-09-17:" in result
